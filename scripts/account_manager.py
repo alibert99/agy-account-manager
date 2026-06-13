@@ -210,34 +210,16 @@ def cmd_add():
     print("  " + "─" * 40)
 
     client_id, client_secret = get_oauth_client()
-    auth_code = [None]
-    server_ready = threading.Event()
-
-    class OAuthHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            parsed = urllib.parse.urlparse(self.path)
-            params = urllib.parse.parse_qs(parsed.query)
-            if "code" in params:
-                auth_code[0] = params["code"][0]
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"<html><body><h2>Authentication successful!</h2>"
-                                b"<p>You can close this tab and return to AGY.</p></body></html>")
-            else:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"Authentication failed.")
-
-        def log_message(self, *args):
-            pass  # Suppress logs
 
     # Find available port
     import socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(('localhost', 0))
-    port = sock.getsockname()[1]
-    sock.close()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('localhost', 0))
+        port = sock.getsockname()[1]
+        sock.close()
+    except:
+        port = 8080
 
     redirect_uri = f"http://localhost:{port}"
     scope = "%20".join(urllib.parse.quote(s, safe='') for s in OAUTH_SCOPES)
@@ -252,44 +234,83 @@ def cmd_add():
         f"&prompt=consent"
     )
 
-    print()
-    print(f"  Opening browser for Google login...")
-    print()
-    print(f"  If the browser doesn't open, visit this URL:")
-    print(f"  {dim(auth_url[:120] + '...')}")
-    print()
-
-    server = http.server.HTTPServer(('localhost', port), OAuthHandler)
-    server.timeout = 120
-
-    # Open browser
+    # Save state to temp file
+    state = {
+        "port": port,
+        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "timestamp": time.time()
+    }
+    STATE_FILE = GEMINI_DIR / "agy_auth_state.json"
     try:
-        webbrowser.open(auth_url)
-    except:
-        print(yellow("  Could not open browser automatically."))
-        print(f"  Please open this URL manually:")
-        print(f"  {auth_url}")
+        with open(STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(yellow(f"  Warning: could not save auth state: {e}"))
 
-    print(dim("  Waiting for authentication (timeout: 2 minutes)..."))
+    print()
+    print(f"  {bold('Step 1')}: Open this URL in your browser to sign in:")
+    print(f"  {cyan(auth_url)}")
+    print()
+    print(f"  {bold('Step 2')}: After authorizing, your browser will redirect to a localhost URL")
+    print(f"  (e.g., http://localhost:{port}/?code=4/0Ad...). It will show 'Unable to connect'—this is normal.")
+    print()
+    print(f"  {bold('Step 3')}: Copy the entire URL or just the code parameter, and run:")
+    print(f"  {green('/account code <copied_code_or_url>')}")
+    print()
 
-    # Wait for callback
-    while auth_code[0] is None:
-        server.handle_request()
-        if auth_code[0] is not None:
-            break
 
-    server.server_close()
-
-    if not auth_code[0]:
-        print(red("  ✗ Authentication timed out or failed."))
+# ============================================================
+# COMMAND: code
+# ============================================================
+def cmd_code(code_or_url):
+    """Exchange code for tokens and save profile."""
+    if not code_or_url:
+        print(red("  ✗ Please provide the code or redirect URL."))
         return
 
-    # Exchange code for tokens
+    # Extract code if full URL was pasted
+    code = code_or_url
+    if "code=" in code_or_url:
+        try:
+            parsed = urllib.parse.urlparse(code_or_url)
+            params = urllib.parse.parse_qs(parsed.query)
+            if "code" in params:
+                code = params["code"][0]
+        except Exception as e:
+            print(yellow(f"  Failed to parse URL, using raw input as code: {e}"))
+
+    # Load state
+    STATE_FILE = GEMINI_DIR / "agy_auth_state.json"
+    redirect_uri = None
+    client_id, client_secret = get_oauth_client()
+
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            redirect_uri = state.get("redirect_uri")
+            client_id = state.get("client_id", client_id)
+            client_secret = state.get("client_secret", client_secret)
+        except:
+            pass
+
+    if not redirect_uri:
+        # Fallback to standard loopback port if state is missing
+        port = 8080
+        if "localhost:" in code_or_url:
+            match = re.search(r"localhost:(\d+)", code_or_url)
+            if match:
+                port = int(match.group(1))
+        redirect_uri = f"http://localhost:{port}"
+        print(yellow(f"  ⚠ Auth state file not found. Guessing redirect_uri: {redirect_uri}"))
+
     print(dim("  Exchanging authorization code..."))
     try:
         import requests
         resp = requests.post(TOKEN_URL, data={
-            "code": auth_code[0],
+            "code": code,
             "client_id": client_id,
             "client_secret": client_secret,
             "redirect_uri": redirect_uri,
@@ -299,6 +320,8 @@ def cmd_add():
         tokens = resp.json()
     except Exception as e:
         print(red(f"  ✗ Token exchange failed: {e}"))
+        if hasattr(e, 'response') and e.response is not None:
+            print(red(f"  Response: {e.response.text}"))
         return
 
     access_token = tokens.get("access_token")
@@ -315,7 +338,6 @@ def cmd_add():
         email = f"account-{int(time.time())}"
 
     # Calculate expiry
-    expires_in = tokens.get("expires_in", 3600)
     expiry = datetime.utcnow().isoformat() + "Z"
 
     # Save profile
@@ -353,16 +375,23 @@ def cmd_add():
     # Set as active if first account
     if not data.get("active"):
         data["active"] = email
-        # Also write to AGY token file
         write_agy_token(token_data)
         print(green(f"  ✓ Set as active account"))
 
     data["accounts"] = accounts
     save_accounts(data)
 
+    # Clean up state file
+    if STATE_FILE.exists():
+        try:
+            STATE_FILE.unlink()
+        except:
+            pass
+
     print()
     print(f"  Total accounts: {bold(str(len(accounts)))}")
     print()
+
 
 
 # ============================================================
@@ -599,6 +628,9 @@ def main():
         cmd_list()
     elif command == "add":
         cmd_add()
+    elif command == "code":
+        code_val = sys.argv[2] if len(sys.argv) > 2 else None
+        cmd_code(code_val)
     elif command == "switch":
         target = sys.argv[2] if len(sys.argv) > 2 else None
         cmd_switch(target)
@@ -611,7 +643,7 @@ def main():
         cmd_config(sys.argv[2:] if len(sys.argv) > 2 else None)
     else:
         print(red(f"  Unknown command: {command}"))
-        print("  Available: list, add, switch, remove, status, config")
+        print("  Available: list, add, code, switch, remove, status, config")
 
 
 if __name__ == "__main__":

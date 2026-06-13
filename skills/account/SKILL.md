@@ -22,7 +22,14 @@ When the user says `/account add`:
 ```bash
 python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py add
 ```
-This will start an OAuth flow. Tell the user to open the URL printed in the terminal in their browser and complete the login.
+This will display a Google OAuth URL and instructions. Tell the user to open the link, login, and copy the code or the redirect URL.
+
+### Exchange code for tokens
+When the user says `/account code <copied_code_or_url>`:
+```bash
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py code <copied_code_or_url>
+```
+Replace `<copied_code_or_url>` with the code or URL provided by the user.
 
 ### Switch to next account
 When the user says `/account switch` with no specific account:
