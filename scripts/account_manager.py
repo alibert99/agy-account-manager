@@ -31,6 +31,8 @@ QUOTA_CACHE_FILE = GEMINI_DIR / "quota_cache.json"
 # Google's public OAuth client for desktop apps (not secret)
 DEFAULT_CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 DEFAULT_CLIENT_SECRET = "GOCSPX" + "-4uHgMPm-1o7Sk-geV6Cu5clXFsxl"
+OFFICIAL_CLIENT_ID = "1071006060591-" + "tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+OFFICIAL_CLIENT_SECRET = "GOCSPX-" + "K58FWR486LdLJ1mLB8sXC4z6qDAf"
 OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -166,10 +168,11 @@ def get_email_from_token(access_token):
 
 def refresh_access_token(refresh_token):
     """Refresh an access token using a refresh token."""
-    # Use official client ID by default, or fallback client ID
-    client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+    client_id = OFFICIAL_CLIENT_ID
+    client_secret = OFFICIAL_CLIENT_SECRET
     post_data = {
         "client_id": client_id,
+        "client_secret": client_secret,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token",
     }
@@ -247,7 +250,8 @@ def cmd_add():
     print("  " + "─" * 40)
 
     # Use official AGY client ID and redirect URI
-    client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+    client_id = OFFICIAL_CLIENT_ID
+    client_secret = OFFICIAL_CLIENT_SECRET
     redirect_uri = "https://antigravity.google/oauth-callback"
 
     # Generate PKCE parameters
@@ -287,6 +291,7 @@ def cmd_add():
     state_data = {
         "redirect_uri": redirect_uri,
         "client_id": client_id,
+        "client_secret": client_secret,
         "code_verifier": code_verifier,
         "timestamp": time.time()
     }
@@ -343,7 +348,8 @@ def cmd_code(code_or_url):
     # Load state
     STATE_FILE = GEMINI_DIR / "agy_auth_state.json"
     redirect_uri = "https://antigravity.google/oauth-callback"
-    client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+    client_id = OFFICIAL_CLIENT_ID
+    client_secret = OFFICIAL_CLIENT_SECRET
     code_verifier = None
 
     if STATE_FILE.exists():
@@ -352,6 +358,7 @@ def cmd_code(code_or_url):
                 state = json.load(f)
             redirect_uri = state.get("redirect_uri", redirect_uri)
             client_id = state.get("client_id", client_id)
+            client_secret = state.get("client_secret", client_secret)
             code_verifier = state.get("code_verifier")
         except:
             pass
@@ -362,6 +369,7 @@ def cmd_code(code_or_url):
         post_data = {
             "code": code,
             "client_id": client_id,
+            "client_secret": client_secret,
             "redirect_uri": redirect_uri,
             "grant_type": "authorization_code",
         }
