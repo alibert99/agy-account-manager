@@ -128,6 +128,12 @@ def handle_post():
         return
 
     # Quota error!
+    try:
+        import time
+        ERROR_FILE.write_text(json.dumps({"quota_error": True, "timestamp": time.time()}))
+    except:
+        pass
+
     retries = get_retry_count()
     max_retries = config.get("max_retries", 3)
 
