@@ -62,6 +62,12 @@ When the user says `/account config`:
 python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py config
 ```
 
+### Show quota limits
+When the user says `/account limits`:
+```bash
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py limits
+```
+
 ## Important Notes
 - After switching accounts, inform the user they may need to restart AGY for the new credentials to take effect.
 - Always run the command and show the output to the user.

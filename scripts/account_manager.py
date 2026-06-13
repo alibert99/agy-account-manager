@@ -41,6 +41,98 @@ OAUTH_SCOPES = [
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 
+# --- Model Limits DB ---
+MODEL_LIMITS = {
+    "gemini-1.5-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
+    "gemini-1.5-pro": {"rpm": 2, "tpm": 32000, "rpd": 50},
+    "gemini-2.0-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
+    "gemini-2.5-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
+    "gemini-3.5-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
+}
+
+def get_active_model():
+    settings_file = AGY_DIR / "settings.json"
+    if settings_file.exists():
+        try:
+            with open(settings_file, 'r') as f:
+                data = json.load(f)
+            return data.get("model", "Unknown")
+        except:
+            pass
+    return "Unknown"
+
+def select_menu(options, title="Select an option:"):
+    """Interactive terminal menu using arrow keys."""
+    import sys
+    import tty
+    import termios
+
+    if not sys.stdin.isatty():
+        # Fallback to standard input prompt if not in TTY
+        print(title)
+        for i, opt in enumerate(options, 1):
+            print(f"  {i}. {opt}")
+        try:
+            choice = input("Enter choice number: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(options):
+                return idx
+        except:
+            pass
+        return None
+
+    # Get terminal settings
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    
+    current_idx = 0
+    try:
+        tty.setraw(sys.stdin.fileno())
+        
+        while True:
+            # Clear screen from cursor down
+            sys.stdout.write("\r\033[J")
+            sys.stdout.write(f"\r{bold(title)}\n")
+            
+            for i, opt in enumerate(options):
+                if i == current_idx:
+                    sys.stdout.write(f"\r  {green('►')} {green(opt)}\n")
+                else:
+                    sys.stdout.write(f"\r    {opt}\n")
+            
+            sys.stdout.write("\r\n\r  (Use Up/Down arrows, Enter to select, Esc to cancel)")
+            sys.stdout.flush()
+            
+            # Read character
+            ch = sys.stdin.read(1)
+            
+            if ch == '\r' or ch == '\n':
+                # Enter pressed
+                break
+            elif ch == '\x1b':
+                # Escape sequence (e.g. arrow keys or Esc)
+                ch2 = sys.stdin.read(1)
+                if ch2 == '[':
+                    ch3 = sys.stdin.read(1)
+                    if ch3 == 'A':
+                        # Up arrow
+                        current_idx = (current_idx - 1) % len(options)
+                    elif ch3 == 'B':
+                        # Down arrow
+                        current_idx = (current_idx + 1) % len(options)
+                else:
+                    # Just escape
+                    current_idx = None
+                    break
+                    
+        # Restore cursor
+        sys.stdout.write("\r\033[J")
+        sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        
+    return current_idx
+
 
 def color(text, code):
     """ANSI color wrapper."""
@@ -217,6 +309,25 @@ def cmd_list():
     accounts = data.get("accounts", [])
     active = data.get("active")
 
+    # If it is an interactive TTY and there are multiple accounts, show menu to switch
+    if sys.stdin.isatty() and len(accounts) > 1:
+        options = []
+        for acc in accounts:
+            email = acc.get("email", "unknown")
+            is_active = (email == active)
+            label = f"{email} [ACTIVE]" if is_active else email
+            options.append(label)
+            
+        choice = select_menu(options, "🔑 Select an account to switch to:")
+        if choice is not None:
+            target_email = accounts[choice]["email"]
+            if target_email != active:
+                cmd_switch(target_email)
+            else:
+                print(green(f"  Already active on: {target_email}"))
+        return
+
+    # Fallback to standard list print
     print()
     print(bold("═" * 56))
     print(bold("  🔑 AGY Account Manager"))
@@ -251,7 +362,7 @@ def cmd_list():
 
     print("  " + "─" * 50)
     print()
-    print(dim("  Commands: /account add | switch | switch <email> | remove <email>"))
+    print(dim("  Commands: /account add | switch | switch <email> | remove <email> | limits"))
     print()
 
 
@@ -690,6 +801,44 @@ def cmd_config(args=None):
 
 
 # ============================================================
+# COMMAND: limits
+# ============================================================
+def cmd_limits():
+    """Display Gemini API limits for the active model."""
+    model = get_active_model()
+    print()
+    print(bold("═" * 56))
+    print(bold("  📈 Gemini API Model Limits & Quota"))
+    print(bold("═" * 56))
+    print()
+    print(f"  Active Model:    {green(model)}")
+    
+    # Try to find limits
+    model_key = model.lower()
+    matched_limits = None
+    for k, v in MODEL_LIMITS.items():
+        if k in model_key or model_key in k:
+            matched_limits = v
+            break
+            
+    if not matched_limits:
+        # Check standard default for flash/pro
+        if "pro" in model_key:
+            matched_limits = MODEL_LIMITS["gemini-1.5-pro"]
+        else:
+            matched_limits = MODEL_LIMITS["gemini-1.5-flash"]
+            
+    print(f"  Requests/Min:    {bold(str(matched_limits['rpm']))} RPM")
+    tpm_val = matched_limits["tpm"]
+    print(f"  Tokens/Min:      {bold(f'{tpm_val:,}')} TPM")
+    print(f"  Requests/Day:    {bold(str(matched_limits['rpd']))} RPD")
+    print()
+    print(dim("  Note: these are default Gemini API tier limits. Your account's actual"))
+    print(dim("  limits may vary depending on your Google Cloud project settings."))
+    print()
+
+
+# ============================================================
 # MAIN
 # ============================================================
 def main():
@@ -716,9 +865,11 @@ def main():
         cmd_status()
     elif command == "config":
         cmd_config(sys.argv[2:] if len(sys.argv) > 2 else None)
+    elif command == "limits":
+        cmd_limits()
     else:
         print(red(f"  Unknown command: {command}"))
-        print("  Available: list, add, code, switch, remove, status, config")
+        print("  Available: list, add, code, switch, remove, status, config, limits")
 
 
 if __name__ == "__main__":
