@@ -317,15 +317,9 @@ def cmd_add():
     except Exception as e:
         print(yellow(f"  Warning: could not save auth state: {e}"))
 
-    # Copy link to local clipboard automatically
-    copied = copy_to_clipboard(auth_url)
-
     print()
-    print(f"  {bold('Step 1')}: Open this URL in your browser to sign in:")
-    print(f"  {cyan(auth_url)}")
-    if copied:
-        print(green("  ✓ Copied sign-in URL to your clipboard automatically!"))
-    print()
+    print(f"  {bold('Step 1')}: Copy the sign-in URL using the copy button on the box below, then open it in your browser:")
+    print(f"```text\n{auth_url}\n```")
     print(f"  {bold('Step 2')}: After authorizing, copy the authorization code from the")
     print(f"  Antigravity web page (click the 'Copy' button on the screen).")
     print()
