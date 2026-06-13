@@ -256,11 +256,20 @@ def cmd_add():
     print(f"  {bold('Step 2')}: After authorizing, your browser will redirect to a localhost URL")
     print(f"  (e.g., http://localhost:{port}/?code=4/0Ad...). It will show 'Unable to connect'—this is normal.")
     print()
-    print(f"  {bold('Step 3')}: Copy the entire URL or just the code parameter, and run:")
-    print(f"  {green('/account code <copied_code_or_url>')}  (inside AGY)")
-    print(f"  or")
-    print(f"  {green('agy-account code <copied_code_or_url>')}  (in your terminal)")
-    print()
+    if sys.stdin.isatty():
+        print(f"  {bold('Step 3')}: Copy the entire URL or just the code parameter, and paste it below:")
+        try:
+            code_or_url = input(cyan("  Paste redirect URL or code here: ")).strip()
+            if code_or_url:
+                cmd_code(code_or_url)
+        except (KeyboardInterrupt, EOFError):
+            print(yellow("\n  Cancelled."))
+    else:
+        print(f"  {bold('Step 3')}: Copy the entire URL or just the code parameter, and run:")
+        print(f"  {green('/account code <copied_code_or_url>')}  (inside AGY)")
+        print(f"  or")
+        print(f"  {green('agy-account code <copied_code_or_url>')}  (in your terminal)")
+        print()
 
 
 # ============================================================
