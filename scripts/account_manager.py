@@ -257,7 +257,9 @@ def cmd_add():
     print(f"  (e.g., http://localhost:{port}/?code=4/0Ad...). It will show 'Unable to connect'—this is normal.")
     print()
     print(f"  {bold('Step 3')}: Copy the entire URL or just the code parameter, and run:")
-    print(f"  {green('/account code <copied_code_or_url>')}")
+    print(f"  {green('/account code <copied_code_or_url>')}  (inside AGY)")
+    print(f"  or")
+    print(f"  {green('agy-account code <copied_code_or_url>')}  (in your terminal)")
     print()
 
 
