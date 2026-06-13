@@ -1,0 +1,5 @@
+{
+  "name": "agy-account-manager",
+  "version": "1.0.0",
+  "description": "Multi-account manager for AGY. Add, list, and switch Google accounts with auto-rotation on quota exhaustion."
+}

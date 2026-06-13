@@ -1,0 +1,26 @@
+{
+  "agy-quota-manager": {
+    "PostInvocation": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /home/ubuntu/.gemini/config/plugins/agy-account-manager/scripts/agy_quota_hook.py post"
+          }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /home/ubuntu/.gemini/config/plugins/agy-account-manager/scripts/agy_quota_hook.py pre"
+          }
+        ]
+      }
+    ]
+  }
+}
