@@ -110,7 +110,13 @@ def select_menu(options, title="Select an option:"):
             sys.stdout.flush()
             
             # Read character
-            ch = sys.stdin.read(1)
+            try:
+                ch_bytes = os.read(fd, 1)
+                if not ch_bytes:
+                    break
+                ch = ch_bytes.decode('utf-8', errors='ignore')
+            except Exception:
+                break
             
             if ch == '\r' or ch == '\n':
                 # Enter pressed
@@ -118,13 +124,15 @@ def select_menu(options, title="Select an option:"):
             elif ch == '\x1b':
                 # Escape sequence (e.g. arrow keys or Esc)
                 import select
-                rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                rlist, _, _ = select.select([fd], [], [], 0.05)
                 if rlist:
-                    ch2 = sys.stdin.read(1)
+                    ch2_bytes = os.read(fd, 1)
+                    ch2 = ch2_bytes.decode('utf-8', errors='ignore')
                     if ch2 == '[':
-                        rlist2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                        rlist2, _, _ = select.select([fd], [], [], 0.05)
                         if rlist2:
-                            ch3 = sys.stdin.read(1)
+                            ch3_bytes = os.read(fd, 1)
+                            ch3 = ch3_bytes.decode('utf-8', errors='ignore')
                             if ch3 == 'A':
                                 # Up arrow
                                 current_idx = (current_idx - 1) % len(options)
