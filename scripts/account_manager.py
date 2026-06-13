@@ -54,6 +54,21 @@ def bold(t): return color(t, "1")
 def dim(t): return color(t, "2")
 
 
+def copy_to_clipboard(text):
+    """Attempt to copy text to the local clipboard using OSC 52 escape sequence."""
+    try:
+        import base64
+        # Base64 encode the text
+        b64_text = base64.b64encode(text.encode('utf-8')).decode('utf-8')
+        # OSC 52 sequence: ESC ] 52 ; c ; <base64> BEL
+        sequence = f"\033]52;c;{b64_text}\a"
+        sys.stderr.write(sequence)
+        sys.stderr.flush()
+        return True
+    except:
+        return False
+
+
 def load_accounts():
     """Load accounts registry."""
     data = {"accounts": [], "active": None}
@@ -302,9 +317,14 @@ def cmd_add():
     except Exception as e:
         print(yellow(f"  Warning: could not save auth state: {e}"))
 
+    # Copy link to local clipboard automatically
+    copied = copy_to_clipboard(auth_url)
+
     print()
     print(f"  {bold('Step 1')}: Open this URL in your browser to sign in:")
     print(f"  {cyan(auth_url)}")
+    if copied:
+        print(green("  ✓ Copied sign-in URL to your clipboard automatically!"))
     print()
     print(f"  {bold('Step 2')}: After authorizing, copy the authorization code from the")
     print(f"  Antigravity web page (click the 'Copy' button on the screen).")
