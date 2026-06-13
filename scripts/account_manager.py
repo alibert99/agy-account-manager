@@ -86,10 +86,16 @@ def select_menu(options, title="Select an option:"):
     old_settings = termios.tcgetattr(fd)
     
     current_idx = 0
+    first_render = True
     try:
-        tty.setraw(sys.stdin.fileno())
+        tty.setraw(fd)
         
         while True:
+            if not first_render:
+                # Move cursor up by len(options) + 2 lines to overwrite the menu
+                sys.stdout.write(f"\033[{len(options) + 2}A")
+            first_render = False
+            
             # Clear screen from cursor down
             sys.stdout.write("\r\033[J")
             sys.stdout.write(f"\r{bold(title)}\n")
@@ -111,21 +117,27 @@ def select_menu(options, title="Select an option:"):
                 break
             elif ch == '\x1b':
                 # Escape sequence (e.g. arrow keys or Esc)
-                ch2 = sys.stdin.read(1)
-                if ch2 == '[':
-                    ch3 = sys.stdin.read(1)
-                    if ch3 == 'A':
-                        # Up arrow
-                        current_idx = (current_idx - 1) % len(options)
-                    elif ch3 == 'B':
-                        # Down arrow
-                        current_idx = (current_idx + 1) % len(options)
+                import select
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if rlist:
+                    ch2 = sys.stdin.read(1)
+                    if ch2 == '[':
+                        rlist2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                        if rlist2:
+                            ch3 = sys.stdin.read(1)
+                            if ch3 == 'A':
+                                # Up arrow
+                                current_idx = (current_idx - 1) % len(options)
+                            elif ch3 == 'B':
+                                # Down arrow
+                                current_idx = (current_idx + 1) % len(options)
                 else:
                     # Just escape
                     current_idx = None
                     break
                     
-        # Restore cursor
+        # Clear the menu from screen on exit
+        sys.stdout.write(f"\033[{len(options) + 2}A")
         sys.stdout.write("\r\033[J")
         sys.stdout.flush()
     finally:
