@@ -54,13 +54,42 @@ def dim(t): return color(t, "2")
 
 def load_accounts():
     """Load accounts registry."""
+    data = {"accounts": [], "active": None}
     if ACCOUNTS_FILE.exists():
         try:
             with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
         except:
             pass
-    return {"accounts": [], "active": None}
+
+    # Auto-detect currently logged in AGY account if registry is empty
+    if not data.get("accounts") and AGY_TOKEN_FILE.exists():
+        try:
+            with open(AGY_TOKEN_FILE, 'r', encoding='utf-8') as f:
+                token_data = json.load(f)
+            access_token = token_data.get("token", {}).get("access_token")
+            if access_token:
+                email = get_email_from_token(access_token)
+                if email:
+                    # Save as active profile
+                    profile_dir = PROFILES_DIR / email
+                    profile_dir.mkdir(parents=True, exist_ok=True)
+                    with open(profile_dir / "token.json", 'w', encoding='utf-8') as pf:
+                        json.dump(token_data, pf, indent=2)
+                    
+                    # Update registry
+                    data = {
+                        "accounts": [{
+                            "email": email,
+                            "added_at": datetime.now().strftime("%Y-%m-%d %H:%M")
+                        }],
+                        "active": email
+                    }
+                    save_accounts(data)
+        except:
+            pass
+
+    return data
 
 
 def save_accounts(data):
@@ -137,15 +166,23 @@ def get_email_from_token(access_token):
 
 def refresh_access_token(refresh_token):
     """Refresh an access token using a refresh token."""
-    client_id, client_secret = get_oauth_client()
+    # Use official client ID by default, or fallback client ID
+    client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+    post_data = {
+        "client_id": client_id,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }
+    
+    config = load_config()
+    config_client_id = config.get("client_id")
+    if config_client_id and config_client_id != client_id:
+        post_data["client_id"] = config_client_id
+        post_data["client_secret"] = config.get("client_secret", DEFAULT_CLIENT_SECRET)
+
     try:
         import requests
-        resp = requests.post(TOKEN_URL, data={
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        }, timeout=10)
+        resp = requests.post(TOKEN_URL, data=post_data, timeout=10)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
@@ -209,43 +246,54 @@ def cmd_add():
     print(bold("  🔑 Add Google Account"))
     print("  " + "─" * 40)
 
-    client_id, client_secret = get_oauth_client()
+    # Use official AGY client ID and redirect URI
+    client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+    redirect_uri = "https://antigravity.google/oauth-callback"
 
-    # Find available port
-    import socket
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(('localhost', 0))
-        port = sock.getsockname()[1]
-        sock.close()
-    except:
-        port = 8080
+    # Generate PKCE parameters
+    import secrets
+    import hashlib
+    import base64
+    code_verifier = secrets.token_urlsafe(64)
+    sha256_hash = hashlib.sha256(code_verifier.encode('utf-8')).digest()
+    code_challenge = base64.urlsafe_b64encode(sha256_hash).decode('utf-8').rstrip('=')
 
-    redirect_uri = f"http://localhost:{port}"
-    scope = "%20".join(urllib.parse.quote(s, safe='') for s in OAUTH_SCOPES)
+    # Scopes used by native AGY
+    scopes = [
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/cclog",
+        "https://www.googleapis.com/auth/experimentsandconfigs",
+        "openid"
+    ]
+    scope = "+".join(urllib.parse.quote(s, safe='') for s in scopes)
+    state = secrets.token_urlsafe(16)
 
     auth_url = (
-        f"https://accounts.google.com/o/oauth2/v2/auth?"
-        f"client_id={client_id}"
+        f"https://accounts.google.com/o/oauth2/auth?"
+        f"access_type=offline"
+        f"&client_id={client_id}"
+        f"&code_challenge={code_challenge}"
+        f"&code_challenge_method=S256"
+        f"&prompt=consent"
         f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
         f"&response_type=code"
         f"&scope={scope}"
-        f"&access_type=offline"
-        f"&prompt=consent"
+        f"&state={state}"
     )
 
     # Save state to temp file
-    state = {
-        "port": port,
+    state_data = {
         "redirect_uri": redirect_uri,
         "client_id": client_id,
-        "client_secret": client_secret,
+        "code_verifier": code_verifier,
         "timestamp": time.time()
     }
     STATE_FILE = GEMINI_DIR / "agy_auth_state.json"
     try:
         with open(STATE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(state, f)
+            json.dump(state_data, f)
     except Exception as e:
         print(yellow(f"  Warning: could not save auth state: {e}"))
 
@@ -253,22 +301,22 @@ def cmd_add():
     print(f"  {bold('Step 1')}: Open this URL in your browser to sign in:")
     print(f"  {cyan(auth_url)}")
     print()
-    print(f"  {bold('Step 2')}: After authorizing, your browser will redirect to a localhost URL")
-    print(f"  (e.g., http://localhost:{port}/?code=4/0Ad...). It will show 'Unable to connect'—this is normal.")
+    print(f"  {bold('Step 2')}: After authorizing, copy the authorization code from the")
+    print(f"  Antigravity web page (click the 'Copy' button on the screen).")
     print()
     if sys.stdin.isatty():
-        print(f"  {bold('Step 3')}: Copy the entire URL or just the code parameter, and paste it below:")
+        print(f"  {bold('Step 3')}: Paste the copied code below:")
         try:
-            code_or_url = input(cyan("  Paste redirect URL or code here: ")).strip()
+            code_or_url = input(cyan("  Paste code here: ")).strip()
             if code_or_url:
                 cmd_code(code_or_url)
         except (KeyboardInterrupt, EOFError):
             print(yellow("\n  Cancelled."))
     else:
-        print(f"  {bold('Step 3')}: Copy the entire URL or just the code parameter, and run:")
-        print(f"  {green('/account code <copied_code_or_url>')}  (inside AGY)")
+        print(f"  {bold('Step 3')}: Paste the code using this command:")
+        print(f"  {green('/account code <copied_code>')}  (inside AGY)")
         print(f"  or")
-        print(f"  {green('agy-account code <copied_code_or_url>')}  (in your terminal)")
+        print(f"  {green('agy-account code <copied_code>')}  (in your terminal)")
         print()
 
 
@@ -278,7 +326,7 @@ def cmd_add():
 def cmd_code(code_or_url):
     """Exchange code for tokens and save profile."""
     if not code_or_url:
-        print(red("  ✗ Please provide the code or redirect URL."))
+        print(red("  ✗ Please provide the authorization code."))
         return
 
     # Extract code if full URL was pasted
@@ -294,39 +342,33 @@ def cmd_code(code_or_url):
 
     # Load state
     STATE_FILE = GEMINI_DIR / "agy_auth_state.json"
-    redirect_uri = None
-    client_id, client_secret = get_oauth_client()
+    redirect_uri = "https://antigravity.google/oauth-callback"
+    client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+    code_verifier = None
 
     if STATE_FILE.exists():
         try:
             with open(STATE_FILE, 'r', encoding='utf-8') as f:
                 state = json.load(f)
-            redirect_uri = state.get("redirect_uri")
+            redirect_uri = state.get("redirect_uri", redirect_uri)
             client_id = state.get("client_id", client_id)
-            client_secret = state.get("client_secret", client_secret)
+            code_verifier = state.get("code_verifier")
         except:
             pass
-
-    if not redirect_uri:
-        # Fallback to standard loopback port if state is missing
-        port = 8080
-        if "localhost:" in code_or_url:
-            match = re.search(r"localhost:(\d+)", code_or_url)
-            if match:
-                port = int(match.group(1))
-        redirect_uri = f"http://localhost:{port}"
-        print(yellow(f"  ⚠ Auth state file not found. Guessing redirect_uri: {redirect_uri}"))
 
     print(dim("  Exchanging authorization code..."))
     try:
         import requests
-        resp = requests.post(TOKEN_URL, data={
+        post_data = {
             "code": code,
             "client_id": client_id,
-            "client_secret": client_secret,
             "redirect_uri": redirect_uri,
             "grant_type": "authorization_code",
-        }, timeout=10)
+        }
+        if code_verifier:
+            post_data["code_verifier"] = code_verifier
+
+        resp = requests.post(TOKEN_URL, data=post_data, timeout=10)
         resp.raise_for_status()
         tokens = resp.json()
     except Exception as e:
