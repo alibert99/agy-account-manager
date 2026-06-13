@@ -96,17 +96,19 @@ def select_menu(options, title="Select an option:"):
                 sys.stdout.write(f"\033[{len(options) + 2}A")
             first_render = False
             
-            # Clear screen from cursor down
-            sys.stdout.write("\r\033[J")
-            sys.stdout.write(f"\r{bold(title)}\n")
+            # Write title (clear line first)
+            sys.stdout.write(f"\r\033[K{bold(title)}\n")
             
+            # Write options (clear line first)
             for i, opt in enumerate(options):
                 if i == current_idx:
-                    sys.stdout.write(f"\r  {green('►')} {green(opt)}\n")
+                    sys.stdout.write(f"\r\033[K  {green('►')} {green(opt)}\n")
                 else:
-                    sys.stdout.write(f"\r    {opt}\n")
+                    sys.stdout.write(f"\r\033[K    {opt}\n")
             
-            sys.stdout.write("\r\n\r  (Use Up/Down arrows, Enter to select, Esc to cancel)")
+            # Write footer (clear line first)
+            sys.stdout.write("\r\033[K\n")
+            sys.stdout.write("\r\033[K  (Use Up/Down arrows, Enter to select, Esc to cancel)")
             sys.stdout.flush()
             
             # Read character
