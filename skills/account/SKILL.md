@@ -62,10 +62,10 @@ When the user says `/account config`:
 python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py config
 ```
 
-### Show quota limits
-When the user says `/account limits`:
+### Show quota usage
+When the user says `/account usage`:
 ```bash
-python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py limits
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py usage
 ```
 
 ## Important Notes

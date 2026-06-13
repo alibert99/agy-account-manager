@@ -823,9 +823,9 @@ def cmd_config(args=None):
 
 
 # ============================================================
-# COMMAND: limits
+# COMMAND: usage
 # ============================================================
-def cmd_limits():
+def cmd_usage():
     """Display Gemini API limits for the active model."""
     model = get_active_model()
     print()
@@ -887,11 +887,11 @@ def main():
         cmd_status()
     elif command == "config":
         cmd_config(sys.argv[2:] if len(sys.argv) > 2 else None)
-    elif command == "limits":
-        cmd_limits()
+    elif command == "usage":
+        cmd_usage()
     else:
         print(red(f"  Unknown command: {command}"))
-        print("  Available: list, add, code, switch, remove, status, config, limits")
+        print("  Available: list, add, code, switch, remove, status, config, usage")
 
 
 if __name__ == "__main__":
