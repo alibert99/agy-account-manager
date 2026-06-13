@@ -1,0 +1,2 @@
+description = "Manage AGY Google accounts. Add, list, switch, remove, status, or configure accounts."
+prompt = "!{/usr/bin/python3 /home/ubuntu/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py {{args}}}"
