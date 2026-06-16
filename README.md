@@ -19,13 +19,30 @@ Clone this repository to your local machine:
 git clone https://github.com/alibert99/agy-account-manager.git ~/agy-account-manager
 ```
 
-### 2. Install into AGY
-Install the plugin using the AGY plugin command:
+### 2. Run the Setup Script
+Run the provided setup script to automatically install the plugin into AGY and create the `agy-account` shell wrapper command (in `~/.local/bin/`):
 ```bash
-agy plugin install ~/agy-account-manager
+cd ~/agy-account-manager
+./setup.sh
 ```
 
-This will automatically copy the manifest, hooks, and skills into your AGY configuration path (`~/.gemini/config/plugins/agy-account-manager/`).
+Ensure `~/.local/bin` is in your shell `PATH` variable so you can run the command from anywhere.
+
+#### Manual Installation (Alternative)
+If you prefer to install it manually:
+1. Install the plugin using the AGY CLI:
+   ```bash
+   agy plugin install ~/agy-account-manager
+   ```
+2. Create the shell wrapper command manually:
+   ```bash
+   mkdir -p ~/.local/bin
+   cat << 'EOF' > ~/.local/bin/agy-account
+   #!/bin/bash
+   python3 "$HOME/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py" "$@"
+   EOF
+   chmod +x ~/.local/bin/agy-account
+   ```
 
 ---
 
