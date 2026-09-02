@@ -127,7 +127,7 @@ def get_active_model():
 
 
 def select_menu(options, title="Select an option:"):
-    """Interactive terminal menu using arrow keys."""
+    """Interactive terminal menu using arrow keys, vim keys (j/k), or numbers (1-9)."""
     import sys
     import tty
     import termios
@@ -141,7 +141,7 @@ def select_menu(options, title="Select an option:"):
             idx = int(choice) - 1
             if 0 <= idx < len(options):
                 return idx
-        except:
+        except Exception:
             pass
         return None
 
@@ -149,56 +149,55 @@ def select_menu(options, title="Select an option:"):
     old_settings = termios.tcgetattr(fd)
     
     current_idx = 0
+    total_lines = len(options) + 2
     first_render = True
     try:
         tty.setraw(fd)
         
         while True:
             if not first_render:
-                sys.stdout.write(f"\033[{len(options) + 2}A")
+                sys.stdout.write(f"\033[{total_lines}A")
             first_render = False
             
             sys.stdout.write(f"\r\033[K{bold(title)}\n")
             for i, opt in enumerate(options):
+                num_tag = f"[{i+1}]"
                 if i == current_idx:
-                    sys.stdout.write(f"\r\033[K  {green('►')} {green(opt)}\n")
+                    sys.stdout.write(f"\r\033[K  {green('►')} {green(num_tag)} {green(opt)}\n")
                 else:
-                    sys.stdout.write(f"\r\033[K    {opt}\n")
+                    sys.stdout.write(f"\r\033[K    {dim(num_tag)} {opt}\n")
             
-            sys.stdout.write("\r\033[K\n")
-            sys.stdout.write("\r\033[K  (Use Up/Down arrows, Enter to select, Esc to cancel)")
+            sys.stdout.write(f"\r\033[K  (Use ↑/↓ or j/k to move, 1-{len(options)} to pick, Enter to select, Esc to cancel)\n")
             sys.stdout.flush()
             
             try:
-                ch_bytes = os.read(fd, 1)
-                if not ch_bytes:
+                seq = os.read(fd, 16)
+                if not seq:
                     break
-                ch = ch_bytes.decode('utf-8', errors='ignore')
             except Exception:
                 break
             
-            if ch == '\r' or ch == '\n':
+            if seq in (b'\r', b'\n'):
+                # Enter selected
                 break
-            elif ch == '\x1b':
-                import select
-                rlist, _, _ = select.select([fd], [], [], 0.05)
-                if rlist:
-                    ch2_bytes = os.read(fd, 1)
-                    ch2 = ch2_bytes.decode('utf-8', errors='ignore')
-                    if ch2 == '[':
-                        rlist2, _, _ = select.select([fd], [], [], 0.05)
-                        if rlist2:
-                            ch3_bytes = os.read(fd, 1)
-                            ch3 = ch3_bytes.decode('utf-8', errors='ignore')
-                            if ch3 == 'A':
-                                current_idx = (current_idx - 1) % len(options)
-                            elif ch3 == 'B':
-                                current_idx = (current_idx + 1) % len(options)
-                else:
-                    current_idx = None
+            elif seq in (b'\x1b[A', b'\x1bOA', b'k', b'K', b'w', b'W'):
+                # Up arrow or vim key
+                current_idx = (current_idx - 1) % len(options)
+            elif seq in (b'\x1b[B', b'\x1bOB', b'j', b'J', b's', b'S'):
+                # Down arrow or vim key
+                current_idx = (current_idx + 1) % len(options)
+            elif seq in (b'\x1b', b'q', b'Q', b'\x03'):
+                # Escape, q, or Ctrl+C
+                current_idx = None
+                break
+            elif seq.isdigit():
+                # Direct number selection (e.g. 1 to 9)
+                num = int(seq.decode(errors='ignore')) - 1
+                if 0 <= num < len(options):
+                    current_idx = num
                     break
                     
-        sys.stdout.write(f"\033[{len(options) + 2}A")
+        sys.stdout.write(f"\033[{total_lines}A")
         sys.stdout.write("\r\033[J")
         sys.stdout.flush()
     finally:
@@ -780,13 +779,26 @@ def cmd_switch(target=None):
             return
 
         if target is None:
-            best = get_best_account_to_switch(exclude_active=True)
-            if best:
-                target = best
+            if sys.stdin.isatty() and len(accounts) > 1:
+                options = []
+                for acc in accounts:
+                    em = acc["email"]
+                    tag = f"{em} [ACTIVE]" if em == active else em
+                    options.append(tag)
+                choice = select_menu(options, "🔑 Select an account to switch to:")
+                if choice is not None:
+                    target = accounts[choice]["email"]
+                else:
+                    print(yellow("  Cancelled."))
+                    return
             else:
-                emails = [a["email"] for a in accounts]
-                idx = (emails.index(active) + 1) % len(emails) if active in emails else 0
-                target = emails[idx]
+                best = get_best_account_to_switch(exclude_active=True)
+                if best:
+                    target = best
+                else:
+                    emails = [a["email"] for a in accounts]
+                    idx = (emails.index(active) + 1) % len(emails) if active in emails else 0
+                    target = emails[idx]
         else:
             found = None
             try:
