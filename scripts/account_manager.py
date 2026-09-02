@@ -808,30 +808,14 @@ def cmd_switch(target=None):
             return
 
         if target is None:
-            if sys.stdin.isatty() and len(accounts) > 1:
-                options = []
-                default_idx = 0
-                for i, acc in enumerate(accounts):
-                    em = acc["email"]
-                    is_active = (em == active)
-                    if is_active:
-                        default_idx = i
-                    tag = f"{em} [ACTIVE]" if is_active else em
-                    options.append(tag)
-                choice = select_menu(options, "🔑 Select an account to switch to:", default_idx=default_idx)
-                if choice is not None:
-                    target = accounts[choice]["email"]
-                else:
-                    print(yellow("  Cancelled."))
-                    return
+            best = get_best_account_to_switch(exclude_active=True)
+            if best:
+                print(dim(f"  🎯 Auto-selecting account with highest quota: {best}"))
+                target = best
             else:
-                best = get_best_account_to_switch(exclude_active=True)
-                if best:
-                    target = best
-                else:
-                    emails = [a["email"] for a in accounts]
-                    idx = (emails.index(active) + 1) % len(emails) if active in emails else 0
-                    target = emails[idx]
+                emails = [a["email"] for a in accounts]
+                idx = (emails.index(active) + 1) % len(emails) if active in emails else 0
+                target = emails[idx]
         else:
             found = None
             try:
