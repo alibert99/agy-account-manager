@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AGY Quota Auto-Switch Hook (unified)
-Handles both PreInvocation and PostInvocation events.
+AGY Quota Auto-Switch Hook (unified & specification-compliant)
+Handles both PreInvocation and PostInvocation events according to the official AGY Hook Contract.
 """
 import json
 import os
@@ -44,10 +44,10 @@ def load_config():
     defaults = {"auto_switch": True, "max_retries": 3}
     if CONFIG_FILE.exists():
         try:
-            with open(CONFIG_FILE, 'r') as f:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             defaults.update(data)
-        except:
+        except Exception:
             pass
     return defaults
 
@@ -56,7 +56,7 @@ def get_retry_count():
     if RETRY_FILE.exists():
         try:
             return int(RETRY_FILE.read_text().strip())
-        except:
+        except Exception:
             pass
     return 0
 
@@ -64,7 +64,7 @@ def get_retry_count():
 def set_retry_count(n):
     try:
         RETRY_FILE.write_text(str(n))
-    except:
+    except Exception:
         pass
 
 
@@ -73,12 +73,14 @@ def reset_retry():
         if f.exists():
             try:
                 f.unlink()
-            except:
+            except Exception:
                 pass
 
 
 def is_quota_error(text):
-    text_lower = text.lower()
+    if not text:
+        return False
+    text_lower = str(text).lower()
     for pattern in QUOTA_ERROR_PATTERNS:
         if re.search(pattern, text_lower, re.IGNORECASE):
             return True
@@ -111,27 +113,27 @@ def handle_post():
     """PostInvocation: check response for quota errors."""
     try:
         context = json.load(sys.stdin)
-    except:
-        print(json.dumps({"decision": "allow"}))
+    except Exception:
+        print(json.dumps({}))
         return
 
     config = load_config()
     if not config.get("auto_switch", True):
-        print(json.dumps({"decision": "allow"}))
+        print(json.dumps({}))
         return
 
     response = context.get("prompt_response", context.get("output", json.dumps(context)))
 
     if not is_quota_error(response):
         reset_retry()
-        print(json.dumps({"decision": "allow"}))
+        print(json.dumps({}))
         return
 
-    # Quota error!
+    # Quota error encountered
     try:
         import time
         ERROR_FILE.write_text(json.dumps({"quota_error": True, "timestamp": time.time()}))
-    except:
+    except Exception:
         pass
 
     retries = get_retry_count()
@@ -140,7 +142,7 @@ def handle_post():
     if retries >= max_retries:
         log(f"Max retries ({max_retries}) reached.")
         reset_retry()
-        print(json.dumps({"decision": "allow"}))
+        print(json.dumps({}))
         return
 
     new_account = switch_next()
@@ -148,22 +150,26 @@ def handle_post():
         set_retry_count(retries + 1)
         msg = f"🔄 Quota exhausted. Switched to: {new_account}. Retry {retries+1}/{max_retries}"
         log(msg)
-        print(json.dumps({"decision": "allow", "systemMessage": msg}))
+        # Comply with official AGY PostInvocation contract
+        print(json.dumps({
+            "injectSteps": [{"ephemeralMessage": msg}],
+            "terminationBehavior": "force_continue"
+        }))
     else:
         log("Failed to switch account.")
-        print(json.dumps({"decision": "allow"}))
+        print(json.dumps({}))
 
 
 def handle_pre():
     """PreInvocation: check if previous request had quota error."""
     try:
         context = json.load(sys.stdin)
-    except:
+    except Exception:
         context = {}
 
     config = load_config()
     if not config.get("auto_switch", True):
-        print(json.dumps({"decision": "allow"}))
+        print(json.dumps({}))
         return
 
     # Check if there's a lingering error state
@@ -177,12 +183,15 @@ def handle_pre():
                     msg = f"🔄 Pre-check: switched to {new_account} due to previous quota error."
                     log(msg)
                     reset_retry()
-                    print(json.dumps({"decision": "allow", "systemMessage": msg}))
+                    # Comply with official AGY PreInvocation contract
+                    print(json.dumps({
+                        "injectSteps": [{"ephemeralMessage": msg}]
+                    }))
                     return
-        except:
+        except Exception:
             pass
 
-    print(json.dumps({"decision": "allow"}))
+    print(json.dumps({}))
 
 
 def main():

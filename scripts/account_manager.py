@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-AGY Account Manager v1.0
+AGY Account Manager v2.0 (Stabilized & Hardened)
 Native account management for Antigravity CLI.
-Supports: add, list, switch, remove, status, config
+Supports: add, list, switch, remove, status, config, usage
 """
 import json
 import os
@@ -11,12 +11,16 @@ import shutil
 import subprocess
 import sys
 import time
-import http.server
-import threading
+import tempfile
 import urllib.parse
-import webbrowser
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from contextlib import contextmanager
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 # --- Paths ---
 GEMINI_DIR = Path(os.path.expanduser("~/.gemini"))
@@ -26,9 +30,10 @@ PROFILES_DIR = GEMINI_DIR / "agy_auth_profiles"
 ACCOUNTS_FILE = GEMINI_DIR / "agy_accounts.json"
 CONFIG_FILE = GEMINI_DIR / "agy_auth_config.json"
 QUOTA_CACHE_FILE = GEMINI_DIR / "quota_cache.json"
+QUOTA_TRACKER_FILE = GEMINI_DIR / "agy_quota_state.json"
+LOCK_FILE = GEMINI_DIR / ".agy_account_manager.lock"
 
 # --- OAuth Config ---
-# Google's public OAuth client for desktop apps (not secret)
 DEFAULT_CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 DEFAULT_CLIENT_SECRET = "GOCSPX" + "-4uHgMPm-1o7Sk-geV6Cu5clXFsxl"
 OFFICIAL_CLIENT_ID = "1071006060591-" + "tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -48,18 +53,78 @@ MODEL_LIMITS = {
     "gemini-2.0-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
     "gemini-2.5-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
     "gemini-3.5-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
+    "gemini-3.7-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
+    "gemini-3.8-flash-high": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
 }
+
+
+_LOCK_DEPTH = 0
+_LOCK_FD = None
+
+@contextmanager
+def file_lock(timeout=10.0):
+    """Reentrant process-level lock to prevent concurrent token overwrites."""
+    global _LOCK_DEPTH, _LOCK_FD
+    if fcntl is None:
+        yield
+        return
+
+    if _LOCK_DEPTH > 0:
+        _LOCK_DEPTH += 1
+        try:
+            yield
+        finally:
+            _LOCK_DEPTH -= 1
+        return
+
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        f = open(LOCK_FILE, "w")
+    except Exception:
+        yield
+        return
+
+    start = time.time()
+    locked = False
+    while True:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+            break
+        except (BlockingIOError, OSError):
+            if time.time() - start > timeout:
+                break
+            time.sleep(0.05)
+    _LOCK_DEPTH = 1
+    _LOCK_FD = f
+    try:
+        yield
+    finally:
+        _LOCK_DEPTH -= 1
+        if _LOCK_DEPTH == 0:
+            if locked:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            try:
+                f.close()
+            except Exception:
+                pass
+            _LOCK_FD = None
+
 
 def get_active_model():
     settings_file = AGY_DIR / "settings.json"
     if settings_file.exists():
         try:
-            with open(settings_file, 'r') as f:
+            with open(settings_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             return data.get("model", "Unknown")
         except:
             pass
     return "Unknown"
+
 
 def select_menu(options, title="Select an option:"):
     """Interactive terminal menu using arrow keys."""
@@ -68,7 +133,6 @@ def select_menu(options, title="Select an option:"):
     import termios
 
     if not sys.stdin.isatty():
-        # Fallback to standard input prompt if not in TTY
         print(title)
         for i, opt in enumerate(options, 1):
             print(f"  {i}. {opt}")
@@ -81,7 +145,6 @@ def select_menu(options, title="Select an option:"):
             pass
         return None
 
-    # Get terminal settings
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     
@@ -92,26 +155,20 @@ def select_menu(options, title="Select an option:"):
         
         while True:
             if not first_render:
-                # Move cursor up by len(options) + 2 lines to overwrite the menu
                 sys.stdout.write(f"\033[{len(options) + 2}A")
             first_render = False
             
-            # Write title (clear line first)
             sys.stdout.write(f"\r\033[K{bold(title)}\n")
-            
-            # Write options (clear line first)
             for i, opt in enumerate(options):
                 if i == current_idx:
                     sys.stdout.write(f"\r\033[K  {green('►')} {green(opt)}\n")
                 else:
                     sys.stdout.write(f"\r\033[K    {opt}\n")
             
-            # Write footer (clear line first)
             sys.stdout.write("\r\033[K\n")
             sys.stdout.write("\r\033[K  (Use Up/Down arrows, Enter to select, Esc to cancel)")
             sys.stdout.flush()
             
-            # Read character
             try:
                 ch_bytes = os.read(fd, 1)
                 if not ch_bytes:
@@ -121,10 +178,8 @@ def select_menu(options, title="Select an option:"):
                 break
             
             if ch == '\r' or ch == '\n':
-                # Enter pressed
                 break
             elif ch == '\x1b':
-                # Escape sequence (e.g. arrow keys or Esc)
                 import select
                 rlist, _, _ = select.select([fd], [], [], 0.05)
                 if rlist:
@@ -136,17 +191,13 @@ def select_menu(options, title="Select an option:"):
                             ch3_bytes = os.read(fd, 1)
                             ch3 = ch3_bytes.decode('utf-8', errors='ignore')
                             if ch3 == 'A':
-                                # Up arrow
                                 current_idx = (current_idx - 1) % len(options)
                             elif ch3 == 'B':
-                                # Down arrow
                                 current_idx = (current_idx + 1) % len(options)
                 else:
-                    # Just escape
                     current_idx = None
                     break
                     
-        # Clear the menu from screen on exit
         sys.stdout.write(f"\033[{len(options) + 2}A")
         sys.stdout.write("\r\033[J")
         sys.stdout.flush()
@@ -157,7 +208,6 @@ def select_menu(options, title="Select an option:"):
 
 
 def color(text, code):
-    """ANSI color wrapper."""
     return f"\033[{code}m{text}\033[0m"
 
 def green(t): return color(t, "32")
@@ -166,21 +216,6 @@ def red(t): return color(t, "31")
 def cyan(t): return color(t, "36")
 def bold(t): return color(t, "1")
 def dim(t): return color(t, "2")
-
-
-def copy_to_clipboard(text):
-    """Attempt to copy text to the local clipboard using OSC 52 escape sequence."""
-    try:
-        import base64
-        # Base64 encode the text
-        b64_text = base64.b64encode(text.encode('utf-8')).decode('utf-8')
-        # OSC 52 sequence: ESC ] 52 ; c ; <base64> BEL
-        sequence = f"\033]52;c;{b64_text}\a"
-        sys.stderr.write(sequence)
-        sys.stderr.flush()
-        return True
-    except:
-        return False
 
 
 def load_accounts():
@@ -202,13 +237,11 @@ def load_accounts():
             if access_token:
                 email = get_email_from_token(access_token)
                 if email:
-                    # Save as active profile
                     profile_dir = PROFILES_DIR / email
                     profile_dir.mkdir(parents=True, exist_ok=True)
                     with open(profile_dir / "token.json", 'w', encoding='utf-8') as pf:
                         json.dump(token_data, pf, indent=2)
                     
-                    # Update registry
                     data = {
                         "accounts": [{
                             "email": email,
@@ -224,10 +257,13 @@ def load_accounts():
 
 
 def save_accounts(data):
-    """Save accounts registry."""
-    ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    """Save accounts registry safely with lock."""
+    with file_lock():
+        ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ACCOUNTS_FILE.with_suffix(".tmp")
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        tmp.replace(ACCOUNTS_FILE)
 
 
 def load_config():
@@ -236,8 +272,8 @@ def load_config():
         "auto_switch": True,
         "threshold": 10,
         "max_retries": 3,
-        "strategy": "gemini3.1-series-only",
-        "model_pattern": "gemini-3.1.*",
+        "strategy": "highest-quota-first",
+        "model_pattern": "gemini-3.*",
     }
     if CONFIG_FILE.exists():
         try:
@@ -250,12 +286,159 @@ def load_config():
 
 
 def save_config(data):
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    with file_lock():
+        tmp = CONFIG_FILE.with_suffix(".tmp")
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        tmp.replace(CONFIG_FILE)
+
+
+def _load_quota_cache():
+    if QUOTA_CACHE_FILE.exists():
+        try:
+            with open(QUOTA_CACHE_FILE, "r", encoding="utf-8") as cf:
+                return json.load(cf)
+        except Exception:
+            pass
+    return {}
+
+
+def _update_quota_cache(email: str, data: dict):
+    try:
+        cache = _load_quota_cache()
+        cache[email] = {"timestamp": time.time(), "data": data}
+        tmp = QUOTA_CACHE_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as cf:
+            json.dump(cache, cf, indent=2)
+        tmp.replace(QUOTA_CACHE_FILE)
+    except Exception:
+        pass
+
+
+def fetch_native_agy_quota(email: str, force_refresh: bool = False) -> dict:
+    """
+    Fetches real native /usage quota directly from Google AGY backend.
+    CRITICAL FIX: Runs in an ISOLATED temporary environment so AGY_TOKEN_FILE
+    is NEVER overwritten or corrupted!
+    """
+    prof_file = PROFILES_DIR / email / "token.json"
+    if not prof_file.exists():
+        return {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "in_cooldown": True, "status_label": "NO CREDENTIALS"}
+
+    # Check cache (valid for 90 seconds)
+    if not force_refresh:
+        cache = _load_quota_cache()
+        entry = cache.get(email)
+        if entry and (time.time() - entry.get("timestamp", 0) < 90):
+            return entry.get("data", {})
+
+    try:
+        with open(prof_file, "r", encoding="utf-8") as f:
+            tdata = json.load(f)
+
+        if not tdata.get("token", {}).get("access_token") and not tdata.get("token", {}).get("refresh_token"):
+            return {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "in_cooldown": True, "status_label": "EMPTY TOKEN"}
+
+        with tempfile.TemporaryDirectory() as td:
+            temp_home = Path(td)
+            cli_dir = temp_home / ".gemini" / "antigravity-cli"
+            cli_dir.mkdir(parents=True)
+            with open(cli_dir / "antigravity-oauth-token", "w", encoding="utf-8") as tf:
+                json.dump(tdata, tf)
+
+            env = os.environ.copy()
+            env["HOME"] = str(temp_home)
+
+            res = subprocess.run(
+                ["agy", "-p", "/usage", "--output-format", "json"],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=12,
+            )
+
+        if res.returncode == 0:
+            parsed = json.loads(res.stdout)
+            cmd_data = parsed.get("command", {}).get("data", {})
+            groups = cmd_data.get("groups", [])
+            gemini_group = next((g for g in groups if "Gemini" in g.get("name", "")), None)
+            if gemini_group:
+                buckets = gemini_group.get("buckets", [])
+                h5_bucket = next((b for b in buckets if "5h" in b.get("id", "") or "Five" in b.get("name", "")), None)
+                weekly_bucket = next((b for b in buckets if "weekly" in b.get("id", "") or "Weekly" in b.get("name", "")), None)
+                h5_pct = round((h5_bucket.get("remaining_fraction", 0.0) * 100), 1) if h5_bucket else 0.0
+                weekly_pct = round((weekly_bucket.get("remaining_fraction", 0.0) * 100), 1) if weekly_bucket else 0.0
+                result = {
+                    "gemini_5h_pct": h5_pct,
+                    "gemini_weekly_pct": weekly_pct,
+                    "reset_5h": h5_bucket.get("reset_time") if h5_bucket else None,
+                    "reset_weekly": weekly_bucket.get("reset_time") if weekly_bucket else None,
+                    "in_cooldown": h5_pct <= 0.0,
+                    "status_label": "READY" if h5_pct >= 15 else "LOW QUOTA" if h5_pct > 0 else "EXHAUSTED",
+                }
+                _update_quota_cache(email, result)
+                return result
+        else:
+            raw_err = (res.stdout or "") + (res.stderr or "")
+            if "eligibility" in raw_err.lower() or "verify" in raw_err.lower():
+                result = {
+                    "gemini_5h_pct": 0.0,
+                    "gemini_weekly_pct": 0.0,
+                    "in_cooldown": True,
+                    "status_label": "NEEDS VERIFICATION",
+                }
+                _update_quota_cache(email, result)
+                return result
+    except Exception as e:
+        return {"error": str(e), "gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "in_cooldown": True, "status_label": "ERROR"}
+
+    fallback = {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "in_cooldown": True, "status_label": "EXHAUSTED"}
+    _update_quota_cache(email, fallback)
+    return fallback
+
+
+def get_best_account_to_switch(exclude_active: bool = True) -> str | None:
+    data = load_accounts()
+    accounts = data.get("accounts", [])
+    active = data.get("active")
+    if not accounts:
+        return None
+
+    cfg = load_config()
+    threshold = float(cfg.get("threshold", 5.0))
+
+    available = []
+    standby = []
+
+    for acc in accounts:
+        em = acc["email"]
+        if exclude_active and em == active and len(accounts) > 1:
+            continue
+        qdata = fetch_native_agy_quota(em)
+        h5 = float(qdata.get("gemini_5h_pct", 0.0))
+        weekly = float(qdata.get("gemini_weekly_pct", 0.0))
+
+        # Hard requirement: BOTH 5-hour AND weekly quota must be available!
+        if h5 > threshold and weekly > 0.0:
+            score = (h5 * 1000.0) + weekly
+            available.append((score, em))
+        else:
+            score = weekly
+            standby.append((score, em))
+
+    if available:
+        available.sort(key=lambda x: x[0], reverse=True)
+        return available[0][1]
+
+    # Fallback if all accounts are low on 5h quota
+    if standby:
+        standby.sort(key=lambda x: x[0], reverse=True)
+        return standby[0][1]
+
+    return None
 
 
 def get_oauth_client():
-    """Get OAuth client credentials from config or defaults."""
     config = load_config()
     return (
         config.get("client_id", DEFAULT_CLIENT_ID),
@@ -264,7 +447,6 @@ def get_oauth_client():
 
 
 def get_current_agy_token():
-    """Read current AGY token."""
     if AGY_TOKEN_FILE.exists():
         try:
             with open(AGY_TOKEN_FILE, 'r', encoding='utf-8') as f:
@@ -275,28 +457,36 @@ def get_current_agy_token():
 
 
 def write_agy_token(token_data):
-    """Write token in AGY format."""
-    with open(AGY_TOKEN_FILE, 'w', encoding='utf-8') as f:
-        json.dump(token_data, f)
+    """Atomically write token in AGY format."""
+    AGY_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = AGY_TOKEN_FILE.with_suffix(".tmp")
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(token_data, f, indent=2)
+    tmp.replace(AGY_TOKEN_FILE)
 
 
 def get_email_from_token(access_token):
     """Fetch email from Google userinfo API."""
+    if not access_token:
+        return None
     try:
         import requests
         resp = requests.get(
             USERINFO_URL,
             headers={"Authorization": f"Bearer {access_token}"},
-            timeout=10
+            timeout=8
         )
-        resp.raise_for_status()
-        return resp.json().get("email")
+        if resp.status_code == 200:
+            return resp.json().get("email")
     except:
-        return None
+        pass
+    return None
 
 
 def refresh_access_token(refresh_token):
     """Refresh an access token using a refresh token."""
+    if not refresh_token:
+        return None
     client_id = OFFICIAL_CLIENT_ID
     client_secret = OFFICIAL_CLIENT_SECRET
     post_data = {
@@ -315,10 +505,11 @@ def refresh_access_token(refresh_token):
     try:
         import requests
         resp = requests.post(TOKEN_URL, data=post_data, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print(red(f"  Failed to refresh token: {e}"))
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            return None
+    except Exception:
         return None
 
 
@@ -331,25 +522,6 @@ def cmd_list():
     accounts = data.get("accounts", [])
     active = data.get("active")
 
-    # If it is an interactive TTY and there are multiple accounts, show menu to switch
-    if sys.stdin.isatty() and len(accounts) > 1:
-        options = []
-        for acc in accounts:
-            email = acc.get("email", "unknown")
-            is_active = (email == active)
-            label = f"{email} [ACTIVE]" if is_active else email
-            options.append(label)
-            
-        choice = select_menu(options, "🔑 Select an account to switch to:")
-        if choice is not None:
-            target_email = accounts[choice]["email"]
-            if target_email != active:
-                cmd_switch(target_email)
-            else:
-                print(green(f"  Already active on: {target_email}"))
-        return
-
-    # Fallback to standard list print
     print()
     print(bold("═" * 56))
     print(bold("  🔑 AGY Account Manager"))
@@ -384,7 +556,7 @@ def cmd_list():
 
     print("  " + "─" * 50)
     print()
-    print(dim("  Commands: /account add | switch | switch <email> | remove <email> | limits"))
+    print(dim("  Commands: /account add | switch | switch <email> | remove <email> | usage"))
     print()
 
 
@@ -397,12 +569,10 @@ def cmd_add():
     print(bold("  🔑 Add Google Account"))
     print("  " + "─" * 40)
 
-    # Use official AGY client ID and redirect URI
     client_id = OFFICIAL_CLIENT_ID
     client_secret = OFFICIAL_CLIENT_SECRET
     redirect_uri = "https://antigravity.google/oauth-callback"
 
-    # Generate PKCE parameters
     import secrets
     import hashlib
     import base64
@@ -410,7 +580,6 @@ def cmd_add():
     sha256_hash = hashlib.sha256(code_verifier.encode('utf-8')).digest()
     code_challenge = base64.urlsafe_b64encode(sha256_hash).decode('utf-8').rstrip('=')
 
-    # Scopes used by native AGY
     scopes = [
         "https://www.googleapis.com/auth/cloud-platform",
         "https://www.googleapis.com/auth/userinfo.email",
@@ -435,7 +604,6 @@ def cmd_add():
         f"&state={state}"
     )
 
-    # Save state to temp file
     state_data = {
         "redirect_uri": redirect_uri,
         "client_id": client_id,
@@ -451,7 +619,7 @@ def cmd_add():
         print(yellow(f"  Warning: could not save auth state: {e}"))
 
     print()
-    print(f"  {bold('Step 1')}: Copy the sign-in URL using the copy button on the box below, then open it in your browser:")
+    print(f"  {bold('Step 1')}: Copy the sign-in URL using the box below, then open it in your browser:")
     print(f"```text\n{auth_url}\n```")
     print(f"  {bold('Step 2')}: After authorizing, copy the authorization code from the")
     print(f"  Antigravity web page (click the 'Copy' button on the screen).")
@@ -481,7 +649,6 @@ def cmd_code(code_or_url):
         print(red("  ✗ Please provide the authorization code."))
         return
 
-    # Extract code if full URL was pasted
     code = code_or_url
     if "code=" in code_or_url:
         try:
@@ -492,7 +659,6 @@ def cmd_code(code_or_url):
         except Exception as e:
             print(yellow(f"  Failed to parse URL, using raw input as code: {e}"))
 
-    # Load state
     STATE_FILE = GEMINI_DIR / "agy_auth_state.json"
     redirect_uri = "https://antigravity.google/oauth-callback"
     client_id = OFFICIAL_CLIENT_ID
@@ -523,13 +689,11 @@ def cmd_code(code_or_url):
         if code_verifier:
             post_data["code_verifier"] = code_verifier
 
-        resp = requests.post(TOKEN_URL, data=post_data, timeout=10)
+        resp = requests.post(TOKEN_URL, data=post_data, timeout=12)
         resp.raise_for_status()
         tokens = resp.json()
     except Exception as e:
         print(red(f"  ✗ Token exchange failed: {e}"))
-        if hasattr(e, 'response') and e.response is not None:
-            print(red(f"  Response: {e.response.text}"))
         return
 
     access_token = tokens.get("access_token")
@@ -539,16 +703,17 @@ def cmd_code(code_or_url):
         print(red("  ✗ No access token received."))
         return
 
-    # Get email
+    # Authenticate real email from Google
     email = get_email_from_token(access_token)
     if not email:
-        print(yellow("  ⚠ Could not determine email. Using 'unknown'."))
+        print(yellow("  ⚠ Could not determine email. Using fallback timestamp."))
         email = f"account-{int(time.time())}"
 
-    # Calculate expiry
-    expiry = datetime.utcnow().isoformat() + "Z"
+    # Calculate accurate expiry (now + expires_in seconds)
+    expires_in = tokens.get("expires_in", 3600)
+    expiry_dt = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    expiry = expiry_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Save profile
     profile_dir = PROFILES_DIR / email
     profile_dir.mkdir(parents=True, exist_ok=True)
 
@@ -565,31 +730,28 @@ def cmd_code(code_or_url):
     with open(profile_dir / "token.json", 'w', encoding='utf-8') as f:
         json.dump(token_data, f, indent=2)
 
-    # Update accounts registry
-    data = load_accounts()
-    accounts = data.get("accounts", [])
+    with file_lock():
+        data = load_accounts()
+        accounts = data.get("accounts", [])
 
-    # Check if already exists
-    existing = [a for a in accounts if a.get("email") == email]
-    if existing:
-        print(yellow(f"  ⚠ Account {email} already exists. Credentials updated."))
-    else:
-        accounts.append({
-            "email": email,
-            "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        })
-        print(green(f"  ✓ Account added: {email}"))
+        existing = [a for a in accounts if a.get("email") == email]
+        if existing:
+            print(yellow(f"  ⚠ Account {email} already exists. Credentials updated."))
+        else:
+            accounts.append({
+                "email": email,
+                "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            })
+            print(green(f"  ✓ Account added: {email}"))
 
-    # Set as active if first account
-    if not data.get("active"):
-        data["active"] = email
-        write_agy_token(token_data)
-        print(green(f"  ✓ Set as active account"))
+        if not data.get("active"):
+            data["active"] = email
+            write_agy_token(token_data)
+            print(green(f"  ✓ Set as active account"))
 
-    data["accounts"] = accounts
-    save_accounts(data)
+        data["accounts"] = accounts
+        save_accounts(data)
 
-    # Clean up state file
     if STATE_FILE.exists():
         try:
             STATE_FILE.unlink()
@@ -601,104 +763,124 @@ def cmd_code(code_or_url):
     print()
 
 
-
 # ============================================================
 # COMMAND: switch
 # ============================================================
 def cmd_switch(target=None):
-    """Switch to a specific or next account."""
-    data = load_accounts()
-    accounts = data.get("accounts", [])
-    active = data.get("active")
+    """Switch to a specific or next account safely."""
+    with file_lock():
+        data = load_accounts()
+        accounts = data.get("accounts", [])
+        active = data.get("active")
 
-    if len(accounts) < 2:
-        print(yellow("  ⚠ Need at least 2 accounts to switch. Run: /account add"))
-        return
-
-    if target is None:
-        # Switch to next account
-        emails = [a["email"] for a in accounts]
-        if active in emails:
-            idx = (emails.index(active) + 1) % len(emails)
-        else:
-            idx = 0
-        target = emails[idx]
-    else:
-        # Find by email or index
-        found = None
-        # Try as index
-        try:
-            idx = int(target) - 1
-            if 0 <= idx < len(accounts):
-                found = accounts[idx]["email"]
-        except ValueError:
-            pass
-        # Try as email (partial match)
-        if not found:
-            for acc in accounts:
-                if target.lower() in acc["email"].lower():
-                    found = acc["email"]
-                    break
-        if not found:
-            print(red(f"  ✗ Account not found: {target}"))
+        if not accounts:
+            print(red("  ✗ No accounts registered. Run: /account add"))
             return
-        target = found
 
-    if target == active:
-        print(yellow(f"  Already on account: {target}"))
-        return
+        if len(accounts) < 2 and target is None:
+            print(yellow("  ⚠ Need at least 2 accounts to switch. Run: /account add"))
+            return
 
-    # Load target profile
-    profile_dir = PROFILES_DIR / target
-    token_file = profile_dir / "token.json"
-
-    if not token_file.exists():
-        print(red(f"  ✗ No credentials found for: {target}"))
-        return
-
-    # Backup current AGY token to current active profile
-    if active:
-        current_profile = PROFILES_DIR / active
-        current_profile.mkdir(parents=True, exist_ok=True)
-        if AGY_TOKEN_FILE.exists():
-            shutil.copy2(AGY_TOKEN_FILE, current_profile / "token.json")
-
-    # Load target token
-    with open(token_file, 'r', encoding='utf-8') as f:
-        target_token = json.load(f)
-
-    # Try to refresh the token to ensure it's valid
-    refresh_tok = target_token.get("token", {}).get("refresh_token")
-    if refresh_tok:
-        refreshed = refresh_access_token(refresh_tok)
-        if refreshed:
-            target_token["token"]["access_token"] = refreshed.get("access_token", target_token["token"]["access_token"])
-            if "refresh_token" in refreshed:
-                target_token["token"]["refresh_token"] = refreshed["refresh_token"]
-            target_token["token"]["expiry"] = datetime.utcnow().isoformat() + "Z"
-            # Save refreshed token back to profile
-            with open(token_file, 'w', encoding='utf-8') as f:
-                json.dump(target_token, f, indent=2)
-
-    # Write to AGY token file
-    write_agy_token(target_token)
-
-    # Update active
-    data["active"] = target
-    save_accounts(data)
-
-    # Clear caches
-    for cache in [QUOTA_CACHE_FILE, GEMINI_DIR / "mcp-oauth-tokens-v2.json"]:
-        if cache.exists():
+        if target is None:
+            best = get_best_account_to_switch(exclude_active=True)
+            if best:
+                target = best
+            else:
+                emails = [a["email"] for a in accounts]
+                idx = (emails.index(active) + 1) % len(emails) if active in emails else 0
+                target = emails[idx]
+        else:
+            found = None
             try:
-                cache.unlink()
-            except:
+                idx = int(target) - 1
+                if 0 <= idx < len(accounts):
+                    found = accounts[idx]["email"]
+            except ValueError:
+                pass
+            if not found:
+                for acc in accounts:
+                    if target.lower() in acc["email"].lower():
+                        found = acc["email"]
+                        break
+            if not found:
+                print(red(f"  ✗ Account not found: {target}"))
+                return
+            target = found
+
+        if target == active:
+            print(yellow(f"  Already on account: {target}"))
+            return
+
+        # Validate target profile credentials
+        target_dir = PROFILES_DIR / target
+        token_file = target_dir / "token.json"
+
+        if not token_file.exists():
+            print(red(f"  ✗ No credentials found for: {target} (Missing token.json)"))
+            return
+
+        try:
+            with open(token_file, 'r', encoding='utf-8') as f:
+                target_token = json.load(f)
+        except Exception as e:
+            print(red(f"  ✗ Corrupt credentials for {target}: {e}"))
+            return
+
+        refresh_tok = target_token.get("token", {}).get("refresh_token")
+        access_tok = target_token.get("token", {}).get("access_token")
+        if not refresh_tok and not access_tok:
+            print(red(f"  ✗ Account {target} has empty tokens! Please re-authenticate it."))
+            return
+
+        # SAFE BACKUP: Only backup active token IF active email matches token contents
+        if active and AGY_TOKEN_FILE.exists():
+            try:
+                with open(AGY_TOKEN_FILE, 'r', encoding='utf-8') as f:
+                    curr_tok_data = json.load(f)
+                curr_acc = curr_tok_data.get("token", {}).get("access_token")
+                curr_email = get_email_from_token(curr_acc) if curr_acc else None
+                if curr_email == active:
+                    curr_profile = PROFILES_DIR / active
+                    curr_profile.mkdir(parents=True, exist_ok=True)
+                    with open(curr_profile / "token.json", 'w', encoding='utf-8') as pf:
+                        json.dump(curr_tok_data, pf, indent=2)
+            except Exception:
                 pass
 
-    print()
-    print(green(f"  ✓ Switched to: {bold(target)}"))
-    print(yellow(f"  ⚠ Restart AGY for changes to take full effect."))
-    print()
+        # Refresh target token if possible
+        if refresh_tok:
+            refreshed = refresh_access_token(refresh_tok)
+            if refreshed:
+                new_acc = refreshed.get("access_token")
+                if new_acc:
+                    target_token["token"]["access_token"] = new_acc
+                if "refresh_token" in refreshed:
+                    target_token["token"]["refresh_token"] = refreshed["refresh_token"]
+                expires_in = refreshed.get("expires_in", 3600)
+                exp_dt = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+                target_token["token"]["expiry"] = exp_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                
+                with open(token_file, 'w', encoding='utf-8') as f:
+                    json.dump(target_token, f, indent=2)
+
+        # Write to active AGY token file atomically
+        write_agy_token(target_token)
+
+        # Update active account
+        data["active"] = target
+        save_accounts(data)
+
+        # Invalidate quota cache
+        if QUOTA_CACHE_FILE.exists():
+            try:
+                QUOTA_CACHE_FILE.unlink()
+            except Exception:
+                pass
+
+        print()
+        print(green(f"  ✓ Switched to: {bold(target)}"))
+        print(yellow(f"  ⚠ Restart AGY for changes to take full effect."))
+        print()
 
 
 # ============================================================
@@ -710,37 +892,36 @@ def cmd_remove(email):
         print(red("  ✗ Please specify an email to remove."))
         return
 
-    data = load_accounts()
-    accounts = data.get("accounts", [])
+    with file_lock():
+        data = load_accounts()
+        accounts = data.get("accounts", [])
 
-    # Find account
-    found = None
-    for acc in accounts:
-        if email.lower() in acc["email"].lower():
-            found = acc
-            break
+        found = None
+        for acc in accounts:
+            if email.lower() in acc["email"].lower():
+                found = acc
+                break
 
-    if not found:
-        print(red(f"  ✗ Account not found: {email}"))
-        return
+        if not found:
+            print(red(f"  ✗ Account not found: {email}"))
+            return
 
-    actual_email = found["email"]
-    accounts = [a for a in accounts if a["email"] != actual_email]
-    data["accounts"] = accounts
+        actual_email = found["email"]
+        accounts = [a for a in accounts if a["email"] != actual_email]
+        data["accounts"] = accounts
 
-    if data.get("active") == actual_email:
-        data["active"] = accounts[0]["email"] if accounts else None
+        if data.get("active") == actual_email:
+            data["active"] = accounts[0]["email"] if accounts else None
 
-    save_accounts(data)
+        save_accounts(data)
 
-    # Remove profile
-    profile_dir = PROFILES_DIR / actual_email
-    if profile_dir.exists():
-        shutil.rmtree(profile_dir)
+        profile_dir = PROFILES_DIR / actual_email
+        if profile_dir.exists():
+            shutil.rmtree(profile_dir)
 
-    print(green(f"  ✓ Removed: {actual_email}"))
-    if data.get("active"):
-        print(f"  Active account: {data['active']}")
+        print(green(f"  ✓ Removed: {actual_email}"))
+        if data.get("active"):
+            print(f"  Active account: {data['active']}")
 
 
 # ============================================================
@@ -762,20 +943,31 @@ def cmd_status():
     print(f"  Total Accounts:  {bold(str(total))}")
     print(f"  Auto-Switch:     {green('Enabled') if config.get('auto_switch') else red('Disabled')}")
     print(f"  Strategy:        {config.get('strategy', 'N/A')}")
-    print(f"  Threshold:       {config.get('threshold', 10)}%")
+    print(f"  Threshold:       {config.get('threshold', 5)}%")
     print(f"  Max Retries:     {config.get('max_retries', 3)}")
     print()
 
-    # Check AGY token
-    token = get_current_agy_token()
-    if token:
-        expiry = token.get("token", {}).get("expiry", "unknown")
-        print(f"  Token Expiry:    {dim(expiry)}")
-        auth_method = token.get("auth_method", "unknown")
-        print(f"  Auth Method:     {dim(auth_method)}")
-    else:
-        print(yellow("  No AGY token found"))
-
+    print(f"  {bold('Live Account Readiness & Quota Status')}:")
+    print("  " + "─" * 50)
+    for acc in data.get("accounts", []):
+        em = acc.get("email")
+        prof_dir = PROFILES_DIR / em
+        tok_file = prof_dir / "token.json"
+        status_tag = green("● ACTIVE & READY") if em == active else cyan("● READY")
+        if tok_file.exists():
+            try:
+                with open(tok_file) as tf:
+                    tdata = json.load(tf)
+                acc_tok = tdata.get("token", {}).get("access_token")
+                ref_tok = tdata.get("token", {}).get("refresh_token")
+                if not acc_tok and not ref_tok:
+                    status_tag = red("● EMPTY CREDENTIALS")
+            except Exception:
+                status_tag = red("● CORRUPT FILE")
+        else:
+            status_tag = red("● NO CREDENTIALS")
+        print(f"  • {bold(em)}: {status_tag}")
+    print("  " + "─" * 50)
     print()
 
 
@@ -787,7 +979,6 @@ def cmd_config(args=None):
     config = load_config()
 
     if not args:
-        # Show config
         print()
         print(bold("  ⚙ Auto-Switch Configuration"))
         print("  " + "─" * 40)
@@ -798,11 +989,9 @@ def cmd_config(args=None):
         print()
         return
 
-    # Set config
     if len(args) >= 2:
         key = args[0]
         value = args[1]
-        # Type coercion
         if value.lower() in ("true", "yes"):
             value = True
         elif value.lower() in ("false", "no"):
@@ -826,37 +1015,67 @@ def cmd_config(args=None):
 # COMMAND: usage
 # ============================================================
 def cmd_usage():
-    """Display Gemini API limits for the active model."""
-    model = get_active_model()
+    """Display real native AGY /usage quota directly from Google backend for all registered accounts."""
+    data = load_accounts()
+    accounts = data.get("accounts", [])
+    active = data.get("active")
+
     print()
-    print(bold("═" * 56))
-    print(bold("  📈 Gemini API Model Limits & Quota"))
-    print(bold("═" * 56))
+    print(bold("═" * 68))
+    print(bold("  📈 Google AGY Live Quota (Direct Backend Data)"))
+    print(bold("═" * 68))
     print()
-    print(f"  Active Model:    {green(model)}")
-    
-    # Try to find limits
-    model_key = model.lower()
-    matched_limits = None
-    for k, v in MODEL_LIMITS.items():
-        if k in model_key or model_key in k:
-            matched_limits = v
-            break
-            
-    if not matched_limits:
-        # Check standard default for flash/pro
-        if "pro" in model_key:
-            matched_limits = MODEL_LIMITS["gemini-1.5-pro"]
+    print(f"  Active Account:  {green(active) if active else yellow('None')}")
+    print()
+    print("  " + "─" * 68)
+
+    ranked_accounts = []
+    for acc in accounts:
+        em = acc["email"]
+        qdata = fetch_native_agy_quota(em)
+        h5 = qdata.get("gemini_5h_pct", 0.0)
+        weekly = qdata.get("gemini_weekly_pct", 0.0)
+        score = h5 * 10.0 + weekly
+        ranked_accounts.append((score, em, qdata))
+
+    ranked_accounts.sort(key=lambda x: x[0], reverse=True)
+
+    for rank, (score, em, qdata) in enumerate(ranked_accounts, 1):
+        is_active = (em == active)
+        active_tag = green("[ACTIVE]") if is_active else dim("[STANDBY]")
+        h5 = qdata.get("gemini_5h_pct", 0.0)
+        weekly = qdata.get("gemini_weekly_pct", 0.0)
+
+        filled_5h = int(h5 / 100.0 * 12)
+        bar_5h = "█" * filled_5h + "░" * (12 - filled_5h)
+        col_5h = green(bar_5h) if h5 >= 50 else yellow(bar_5h) if h5 >= 15 else red(bar_5h)
+
+        filled_w = int(weekly / 100.0 * 12)
+        bar_w = "█" * filled_w + "░" * (12 - filled_w)
+        col_w = green(bar_w) if weekly >= 50 else yellow(bar_w) if weekly >= 15 else red(bar_w)
+
+        raw_status = qdata.get("status_label", "EXHAUSTED")
+        if raw_status == "READY":
+            status_text = green("READY")
+        elif raw_status == "LOW QUOTA":
+            status_text = yellow("LOW QUOTA")
+        elif raw_status == "NEEDS VERIFICATION":
+            status_text = yellow("NEEDS GOOGLE VERIFICATION (Verify in browser)")
         else:
-            matched_limits = MODEL_LIMITS["gemini-1.5-flash"]
-            
-    print(f"  Requests/Min:    {bold(str(matched_limits['rpm']))} RPM")
-    tpm_val = matched_limits["tpm"]
-    print(f"  Tokens/Min:      {bold(f'{tpm_val:,}')} TPM")
-    print(f"  Requests/Day:    {bold(str(matched_limits['rpd']))} RPD")
-    print()
-    print(dim("  Note: these are default Gemini API tier limits. Your account's actual"))
-    print(dim("  limits may vary depending on your Google Cloud project settings."))
+            status_text = red("EXHAUSTED (0%)")
+
+        if is_active:
+            status_text = green("ACTIVE & IN USE")
+
+        print(f"  #{rank} {bold(em):<30} {active_tag} | Status: {status_text}")
+        print(f"     5-Hour Limit:  [{col_5h}] {bold(f'{h5:.1f}%'):<7} (Reset: {qdata.get('reset_5h', 'N/A')})")
+        print(f"     Weekly Limit:  [{col_w}] {bold(f'{weekly:.1f}%'):<7} (Reset: {qdata.get('reset_weekly', 'N/A')})")
+        print()
+
+    best_next = get_best_account_to_switch(exclude_active=True)
+    if best_next:
+        print(f"  🎯 {cyan('Auto-Switch Priority')}: Next account will be {green(best_next)} (Highest Real Quota)")
+    print("  " + "─" * 68)
     print()
 
 
