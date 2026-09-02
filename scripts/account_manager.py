@@ -126,7 +126,7 @@ def get_active_model():
     return "Unknown"
 
 
-def select_menu(options, title="Select an option:"):
+def select_menu(options, title="Select an option:", default_idx=0):
     """Interactive terminal menu using arrow keys, vim keys (j/k), or numbers (1-9)."""
     import sys
     import tty
@@ -148,7 +148,7 @@ def select_menu(options, title="Select an option:"):
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     
-    current_idx = 0
+    current_idx = max(0, min(default_idx, len(options) - 1))
     total_lines = len(options) + 2
     first_render = True
     try:
@@ -514,10 +514,39 @@ def refresh_access_token(refresh_token):
 # COMMAND: list
 # ============================================================
 def cmd_list():
-    """List all registered accounts."""
+    """List all registered accounts and allow interactive switching."""
     data = load_accounts()
     accounts = data.get("accounts", [])
     active = data.get("active")
+
+    if not accounts:
+        print()
+        print(yellow("  No accounts registered."))
+        print(dim("  Run: agy-account add  — to add your first Google account"))
+        print()
+        return
+
+    # If in an interactive terminal, open interactive arrow/number selection menu
+    if sys.stdin.isatty() and len(accounts) > 1:
+        options = []
+        default_idx = 0
+        for i, acc in enumerate(accounts):
+            email = acc.get("email", "unknown")
+            is_active = (email == active)
+            if is_active:
+                default_idx = i
+            label = f"{email} [ACTIVE]" if is_active else email
+            options.append(label)
+
+        choice = select_menu(options, "🔑 Select an account to switch to:", default_idx=default_idx)
+        if choice is not None:
+            target_email = accounts[choice]["email"]
+            if target_email != active:
+                cmd_switch(target_email)
+            else:
+                print(green(f"\n  ✓ Already active on: {bold(target_email)}\n"))
+            return
+        # If Esc was pressed, fall through to print the full static table below
 
     print()
     print(bold("═" * 56))
@@ -781,11 +810,15 @@ def cmd_switch(target=None):
         if target is None:
             if sys.stdin.isatty() and len(accounts) > 1:
                 options = []
-                for acc in accounts:
+                default_idx = 0
+                for i, acc in enumerate(accounts):
                     em = acc["email"]
-                    tag = f"{em} [ACTIVE]" if em == active else em
+                    is_active = (em == active)
+                    if is_active:
+                        default_idx = i
+                    tag = f"{em} [ACTIVE]" if is_active else em
                     options.append(tag)
-                choice = select_menu(options, "🔑 Select an account to switch to:")
+                choice = select_menu(options, "🔑 Select an account to switch to:", default_idx=default_idx)
                 if choice is not None:
                     target = accounts[choice]["email"]
                 else:
