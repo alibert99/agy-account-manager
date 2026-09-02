@@ -407,33 +407,31 @@ def get_best_account_to_switch(exclude_active: bool = True) -> str | None:
     cfg = load_config()
     threshold = float(cfg.get("threshold", 5.0))
 
-    available = []
-    standby = []
+    import concurrent.futures
 
-    for acc in accounts:
+    def _eval(acc):
         em = acc["email"]
         if exclude_active and em == active and len(accounts) > 1:
-            continue
+            return None
         qdata = fetch_native_agy_quota(em)
         h5 = float(qdata.get("gemini_5h_pct", 0.0))
         weekly = float(qdata.get("gemini_weekly_pct", 0.0))
+        is_avail = (h5 > threshold and weekly > 0.0)
+        score = (h5 * 1000.0) + weekly if is_avail else weekly
+        return (is_avail, score, em)
 
-        # Hard requirement: BOTH 5-hour AND weekly quota must be available!
-        if h5 > threshold and weekly > 0.0:
-            score = (h5 * 1000.0) + weekly
-            available.append((score, em))
-        else:
-            score = weekly
-            standby.append((score, em))
+    max_workers = min(len(accounts), 8)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = [r for r in executor.map(_eval, accounts) if r is not None]
 
-    if available:
-        available.sort(key=lambda x: x[0], reverse=True)
-        return available[0][1]
+    avail = [r for r in results if r[0]]
+    if avail:
+        avail.sort(key=lambda x: x[1], reverse=True)
+        return avail[0][2]
 
-    # Fallback if all accounts are low on 5h quota
-    if standby:
-        standby.sort(key=lambda x: x[0], reverse=True)
-        return standby[0][1]
+    if results:
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[0][2]
 
     return None
 
@@ -1016,6 +1014,8 @@ def cmd_config(args=None):
 # ============================================================
 def cmd_usage():
     """Display real native AGY /usage quota directly from Google backend for all registered accounts."""
+    import concurrent.futures
+
     data = load_accounts()
     accounts = data.get("accounts", [])
     active = data.get("active")
@@ -1029,14 +1029,24 @@ def cmd_usage():
     print()
     print("  " + "─" * 68)
 
-    ranked_accounts = []
-    for acc in accounts:
+    if not accounts:
+        print(yellow("  No accounts registered."))
+        print()
+        return
+
+    print(dim("  ⚡ Querying Google backend live in parallel..."), flush=True)
+
+    def _fetch_worker(acc):
         em = acc["email"]
         qdata = fetch_native_agy_quota(em)
         h5 = qdata.get("gemini_5h_pct", 0.0)
         weekly = qdata.get("gemini_weekly_pct", 0.0)
         score = h5 * 10.0 + weekly
-        ranked_accounts.append((score, em, qdata))
+        return (score, em, qdata)
+
+    max_workers = min(len(accounts), 8)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        ranked_accounts = list(executor.map(_fetch_worker, accounts))
 
     ranked_accounts.sort(key=lambda x: x[0], reverse=True)
 
@@ -1072,8 +1082,20 @@ def cmd_usage():
         print(f"     Weekly Limit:  [{col_w}] {bold(f'{weekly:.1f}%'):<7} (Reset: {qdata.get('reset_weekly', 'N/A')})")
         print()
 
-    best_next = get_best_account_to_switch(exclude_active=True)
-    if best_next:
+    # Fast in-memory priority determination
+    cfg = load_config()
+    threshold = float(cfg.get("threshold", 5.0))
+    candidates = []
+    for score, em, qdata in ranked_accounts:
+        if em != active:
+            h5 = float(qdata.get("gemini_5h_pct", 0.0))
+            weekly = float(qdata.get("gemini_weekly_pct", 0.0))
+            if h5 > threshold and weekly > 0.0:
+                c_score = (h5 * 1000.0) + weekly
+                candidates.append((c_score, em))
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_next = candidates[0][1]
         print(f"  🎯 {cyan('Auto-Switch Priority')}: Next account will be {green(best_next)} (Highest Real Quota)")
     print("  " + "─" * 68)
     print()
