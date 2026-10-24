@@ -55,6 +55,9 @@ MODEL_LIMITS = {
     "gemini-3.5-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
     "gemini-3.7-flash": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
     "gemini-3.8-flash-high": {"rpm": 15, "tpm": 1000000, "rpd": 1500},
+    "gemini-4-argon-high": {"rpm": 5, "tpm": 500000, "rpd": 500},
+    "gemini-4-argon-medium": {"rpm": 5, "tpm": 500000, "rpd": 500},
+    "gemini-4-argon-low": {"rpm": 5, "tpm": 500000, "rpd": 500},
 }
 
 
@@ -213,6 +216,7 @@ def green(t): return color(t, "32")
 def yellow(t): return color(t, "33")
 def red(t): return color(t, "31")
 def cyan(t): return color(t, "36")
+def magenta(t): return color(t, "35")
 def bold(t): return color(t, "1")
 def dim(t): return color(t, "2")
 
@@ -322,21 +326,23 @@ def fetch_native_agy_quota(email: str, force_refresh: bool = False) -> dict:
     """
     prof_file = PROFILES_DIR / email / "token.json"
     if not prof_file.exists():
-        return {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "in_cooldown": True, "status_label": "NO CREDENTIALS"}
+        return {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "has_argon": False, "argon_weekly_pct": None, "reset_argon": None, "in_cooldown": True, "status_label": "NO CREDENTIALS"}
 
     # Check cache (valid for 90 seconds)
     if not force_refresh:
         cache = _load_quota_cache()
         entry = cache.get(email)
         if entry and (time.time() - entry.get("timestamp", 0) < 90):
-            return entry.get("data", {})
+            cdata = entry.get("data", {})
+            if "has_argon" in cdata:
+                return cdata
 
     try:
         with open(prof_file, "r", encoding="utf-8") as f:
             tdata = json.load(f)
 
         if not tdata.get("token", {}).get("access_token") and not tdata.get("token", {}).get("refresh_token"):
-            return {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "in_cooldown": True, "status_label": "EMPTY TOKEN"}
+            return {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "has_argon": False, "argon_weekly_pct": None, "reset_argon": None, "in_cooldown": True, "status_label": "EMPTY TOKEN"}
 
         with tempfile.TemporaryDirectory() as td:
             temp_home = Path(td)
@@ -360,7 +366,17 @@ def fetch_native_agy_quota(email: str, force_refresh: bool = False) -> dict:
             parsed = json.loads(res.stdout)
             cmd_data = parsed.get("command", {}).get("data", {})
             groups = cmd_data.get("groups", [])
-            gemini_group = next((g for g in groups if "Gemini" in g.get("name", "")), None)
+            gemini_group = next((g for g in groups if "Gemini" in g.get("name", "") and "Argon" not in g.get("name", "")), None)
+            if not gemini_group:
+                gemini_group = next((g for g in groups if "Gemini" in g.get("name", "")), None)
+
+            argon_group = next((g for g in groups if "Argon" in g.get("name", "")), None)
+            has_argon = (argon_group is not None)
+            argon_buckets = argon_group.get("buckets", []) if argon_group else []
+            argon_b = argon_buckets[0] if argon_buckets else None
+            argon_pct = round((argon_b.get("remaining_fraction", 0.0) * 100), 1) if argon_b else None
+            reset_argon = argon_b.get("reset_time") if argon_b else None
+
             if gemini_group:
                 buckets = gemini_group.get("buckets", [])
                 h5_bucket = next((b for b in buckets if "5h" in b.get("id", "") or "Five" in b.get("name", "")), None)
@@ -372,6 +388,9 @@ def fetch_native_agy_quota(email: str, force_refresh: bool = False) -> dict:
                     "gemini_weekly_pct": weekly_pct,
                     "reset_5h": h5_bucket.get("reset_time") if h5_bucket else None,
                     "reset_weekly": weekly_bucket.get("reset_time") if weekly_bucket else None,
+                    "has_argon": has_argon,
+                    "argon_weekly_pct": argon_pct,
+                    "reset_argon": reset_argon,
                     "in_cooldown": h5_pct <= 0.0,
                     "status_label": "READY" if h5_pct >= 15 else "LOW QUOTA" if h5_pct > 0 else "EXHAUSTED",
                 }
@@ -383,15 +402,18 @@ def fetch_native_agy_quota(email: str, force_refresh: bool = False) -> dict:
                 result = {
                     "gemini_5h_pct": 0.0,
                     "gemini_weekly_pct": 0.0,
+                    "has_argon": False,
+                    "argon_weekly_pct": None,
+                    "reset_argon": None,
                     "in_cooldown": True,
                     "status_label": "NEEDS VERIFICATION",
                 }
                 _update_quota_cache(email, result)
                 return result
     except Exception as e:
-        return {"error": str(e), "gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "in_cooldown": True, "status_label": "ERROR"}
+        return {"error": str(e), "gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "has_argon": False, "argon_weekly_pct": None, "reset_argon": None, "in_cooldown": True, "status_label": "ERROR"}
 
-    fallback = {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "in_cooldown": True, "status_label": "EXHAUSTED"}
+    fallback = {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "has_argon": False, "argon_weekly_pct": None, "reset_argon": None, "in_cooldown": True, "status_label": "EXHAUSTED"}
     _update_quota_cache(email, fallback)
     return fallback
 
@@ -526,6 +548,8 @@ def cmd_list():
         print()
         return
 
+    cache = _load_quota_cache()
+
     # If in an interactive terminal, open interactive arrow/number selection menu
     if sys.stdin.isatty() and len(accounts) > 1:
         options = []
@@ -535,7 +559,9 @@ def cmd_list():
             is_active = (email == active)
             if is_active:
                 default_idx = i
-            label = f"{email} [ACTIVE]" if is_active else email
+            cached_data = cache.get(email, {}).get("data", {})
+            argon_tag = " [ARGON ⚡]" if cached_data.get("has_argon") else ""
+            label = f"{email} [ACTIVE]{argon_tag}" if is_active else f"{email}{argon_tag}"
             options.append(label)
 
         choice = select_menu(options, "🔑 Select an account to switch to:", default_idx=default_idx)
@@ -567,6 +593,8 @@ def cmd_list():
         email = acc.get("email", "unknown")
         added = acc.get("added_at", "unknown")
         is_active = (email == active)
+        cached_data = cache.get(email, {}).get("data", {})
+        argon_tag = " " + cyan(bold("[ARGON ⚡]")) if cached_data.get("has_argon") else ""
 
         if is_active:
             marker = green("► ")
@@ -577,7 +605,7 @@ def cmd_list():
             label = f"{i}. {email}"
             status = ""
 
-        print(f"  {marker}{label}{status}")
+        print(f"  {marker}{label}{status}{argon_tag}")
         print(dim(f"      Added: {added}"))
 
     print("  " + "─" * 50)
@@ -976,6 +1004,7 @@ def cmd_status():
 
     print(f"  {bold('Live Account Readiness & Quota Status')}:")
     print("  " + "─" * 50)
+    cache = _load_quota_cache()
     for acc in data.get("accounts", []):
         em = acc.get("email")
         prof_dir = PROFILES_DIR / em
@@ -993,7 +1022,9 @@ def cmd_status():
                 status_tag = red("● CORRUPT FILE")
         else:
             status_tag = red("● NO CREDENTIALS")
-        print(f"  • {bold(em)}: {status_tag}")
+        cached_data = cache.get(em, {}).get("data", {})
+        argon_tag = " " + cyan(bold("[ARGON ⚡]")) if cached_data.get("has_argon") else ""
+        print(f"  • {bold(em)}: {status_tag}{argon_tag}")
     print("  " + "─" * 50)
     print()
 
@@ -1106,9 +1137,21 @@ def cmd_usage():
         if is_active:
             status_text = green("ACTIVE & IN USE")
 
-        print(f"  #{rank} {bold(em):<30} {active_tag} | Status: {status_text}")
+        has_argon = qdata.get("has_argon", False)
+        argon_pct = qdata.get("argon_weekly_pct")
+        reset_argon = qdata.get("reset_argon")
+        argon_badge = " " + cyan(bold("[ARGON ⚡]")) if has_argon else ""
+
+        print(f"  #{rank} {bold(em):<28} {active_tag}{argon_badge} | Status: {status_text}")
         print(f"     5-Hour Limit:  [{col_5h}] {bold(f'{h5:.1f}%'):<7} (Reset: {qdata.get('reset_5h', 'N/A')})")
         print(f"     Weekly Limit:  [{col_w}] {bold(f'{weekly:.1f}%'):<7} (Reset: {qdata.get('reset_weekly', 'N/A')})")
+        if has_argon and argon_pct is not None:
+            filled_a = int(argon_pct / 100.0 * 12)
+            bar_a = "█" * filled_a + "░" * (12 - filled_a)
+            col_a = green(bar_a) if argon_pct >= 50 else yellow(bar_a) if argon_pct >= 15 else red(bar_a)
+            print(f"     Argon Quota:   [{col_a}] {bold(f'{argon_pct:.1f}%'):<7} (Reset: {reset_argon or 'N/A'})")
+        else:
+            print(f"     Argon Access:  {dim('— Not enabled (Standard)')}")
         print()
 
     # Fast in-memory priority determination
