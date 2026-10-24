@@ -129,6 +129,30 @@ def get_active_model():
     return "Unknown"
 
 
+def ensure_sane_terminal(saved_settings=None):
+    """Guarantees terminal echo, canonical input, signals, and cursor visibility are restored."""
+    try:
+        import termios
+        if sys.stdin.isatty():
+            fd = sys.stdin.fileno()
+            if saved_settings is not None:
+                try:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, saved_settings)
+                except Exception:
+                    pass
+            attrs = termios.tcgetattr(fd)
+            attrs[0] |= (termios.ICRNL | termios.IXON)
+            attrs[1] |= (termios.OPOST | termios.ONLCR)
+            attrs[3] |= (termios.ECHO | termios.ICANON | termios.ISIG | termios.IEXTEN)
+            termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+            termios.tcflush(fd, termios.TCIFLUSH)
+        if sys.stdout.isatty():
+            sys.stdout.write("\033[0m\033[?25h")
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def select_menu(options, title="Select an option:", default_idx=0):
     """Interactive terminal menu using arrow keys, vim keys (j/k), or numbers (1-9)."""
     import sys
@@ -155,7 +179,8 @@ def select_menu(options, title="Select an option:", default_idx=0):
     total_lines = len(options) + 2
     first_render = True
     try:
-        tty.setraw(fd)
+        tty.setcbreak(fd)
+        sys.stdout.write("\033[?25l")
         
         while True:
             if not first_render:
@@ -166,35 +191,32 @@ def select_menu(options, title="Select an option:", default_idx=0):
             for i, opt in enumerate(options):
                 num_tag = f"[{i+1}]"
                 if i == current_idx:
-                    sys.stdout.write(f"\r\033[K  {green('►')} {green(num_tag)} {green(opt)}\n")
+                    sys.stdout.write(f"\r\033[K  {green('►')} {green(num_tag)} {bold(opt)}\n")
                 else:
                     sys.stdout.write(f"\r\033[K    {dim(num_tag)} {opt}\n")
             
-            sys.stdout.write(f"\r\033[K  (Use ↑/↓ or j/k to move, 1-{len(options)} to pick, Enter to select, Esc to cancel)\n")
+            sys.stdout.write(f"\r\033[K  {dim(f'(↑/↓ hərəkət, 1-{len(options)} və ya Enter seç, q/Esc çıxış)')}\n")
             sys.stdout.flush()
             
             try:
                 seq = os.read(fd, 16)
                 if not seq:
+                    current_idx = None
                     break
             except Exception:
+                current_idx = None
                 break
             
             if seq in (b'\r', b'\n'):
-                # Enter selected
                 break
             elif seq in (b'\x1b[A', b'\x1bOA', b'k', b'K', b'w', b'W'):
-                # Up arrow or vim key
                 current_idx = (current_idx - 1) % len(options)
             elif seq in (b'\x1b[B', b'\x1bOB', b'j', b'J', b's', b'S'):
-                # Down arrow or vim key
                 current_idx = (current_idx + 1) % len(options)
-            elif seq in (b'\x1b', b'q', b'Q', b'\x03'):
-                # Escape, q, or Ctrl+C
+            elif seq in (b'\x1b', b'q', b'Q', b'0', b'\x03', b'\x04', b'\x1a') or seq.startswith(b'\x1b'):
                 current_idx = None
                 break
-            elif seq.isdigit():
-                # Direct number selection (e.g. 1 to 9)
+            elif len(seq) == 1 and seq.isdigit():
                 num = int(seq.decode(errors='ignore')) - 1
                 if 0 <= num < len(options):
                     current_idx = num
@@ -204,7 +226,7 @@ def select_menu(options, title="Select an option:", default_idx=0):
         sys.stdout.write("\r\033[J")
         sys.stdout.flush()
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        ensure_sane_terminal(old_settings)
         
     return current_idx
 
@@ -344,26 +366,68 @@ def fetch_native_agy_quota(email: str, force_refresh: bool = False) -> dict:
         if not tdata.get("token", {}).get("access_token") and not tdata.get("token", {}).get("refresh_token"):
             return {"gemini_5h_pct": 0.0, "gemini_weekly_pct": 0.0, "has_argon": False, "argon_weekly_pct": None, "reset_argon": None, "in_cooldown": True, "status_label": "EMPTY TOKEN"}
 
+        stdout_data = ""
+        stderr_data = ""
         with tempfile.TemporaryDirectory() as td:
             temp_home = Path(td)
             cli_dir = temp_home / ".gemini" / "antigravity-cli"
             cli_dir.mkdir(parents=True)
-            with open(cli_dir / "antigravity-oauth-token", "w", encoding="utf-8") as tf:
+            temp_tok_file = cli_dir / "antigravity-oauth-token"
+            with open(temp_tok_file, "w", encoding="utf-8") as tf:
                 json.dump(tdata, tf)
 
             env = os.environ.copy()
             env["HOME"] = str(temp_home)
 
-            res = subprocess.run(
+            import select
+            import signal
+            proc = subprocess.Popen(
                 ["agy", "-p", "/usage", "--output-format", "json"],
-                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 env=env,
-                timeout=12,
+                start_new_session=True,
             )
+            try:
+                deadline = time.time() + 10.0
+                while time.time() < deadline:
+                    rlist, _, _ = select.select([proc.stdout], [], [], max(0.1, deadline - time.time()))
+                    if not rlist:
+                        break
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    stdout_data += line
+                    if line.strip().startswith("{") and line.strip().endswith("}"):
+                        break
+            finally:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
 
-        if res.returncode == 0:
-            parsed = json.loads(res.stdout)
+            if temp_tok_file.exists():
+                try:
+                    with open(temp_tok_file, "r", encoding="utf-8") as ntf:
+                        new_tdata = json.load(ntf)
+                    if new_tdata.get("token", {}).get("access_token") != tdata.get("token", {}).get("access_token"):
+                        with open(prof_file, "w", encoding="utf-8") as ptf:
+                            json.dump(new_tdata, ptf, indent=2)
+                except Exception:
+                    pass
+
+        json_line = next((l.strip() for l in stdout_data.splitlines() if l.strip().startswith("{")), "")
+        if json_line:
+            parsed = json.loads(json_line)
             cmd_data = parsed.get("command", {}).get("data", {})
             groups = cmd_data.get("groups", [])
             gemini_group = next((g for g in groups if "Gemini" in g.get("name", "") and "Argon" not in g.get("name", "")), None)
@@ -397,7 +461,7 @@ def fetch_native_agy_quota(email: str, force_refresh: bool = False) -> dict:
                 _update_quota_cache(email, result)
                 return result
         else:
-            raw_err = (res.stdout or "") + (res.stderr or "")
+            raw_err = stdout_data + stderr_data
             if "eligibility" in raw_err.lower() or "verify" in raw_err.lower():
                 result = {
                     "gemini_5h_pct": 0.0,
@@ -560,19 +624,18 @@ def cmd_list():
             if is_active:
                 default_idx = i
             cached_data = cache.get(email, {}).get("data", {})
-            argon_tag = " [ARGON ⚡]" if cached_data.get("has_argon") else ""
-            label = f"{email} [ACTIVE]{argon_tag}" if is_active else f"{email}{argon_tag}"
+            argon_tag = " ⚡Argon" if cached_data.get("has_argon") else ""
+            label = f"{email} [AKTİV]{argon_tag}" if is_active else f"{email}{argon_tag}"
             options.append(label)
 
-        choice = select_menu(options, "🔑 Select an account to switch to:", default_idx=default_idx)
+        choice = select_menu(options, "🔑 Hesab seçin:", default_idx=default_idx)
         if choice is not None:
             target_email = accounts[choice]["email"]
             if target_email != active:
                 cmd_switch(target_email)
             else:
-                print(green(f"\n  ✓ Already active on: {bold(target_email)}\n"))
-            return
-        # If Esc was pressed, fall through to print the full static table below
+                print(green(f"  ✓ Artıq aktivdir: {bold(target_email)}"))
+        return
 
     print()
     print(bold("═" * 56))
@@ -1073,36 +1136,32 @@ def cmd_config(args=None):
 # COMMAND: usage
 # ============================================================
 def cmd_usage():
-    """Display real native AGY /usage quota directly from Google backend for all registered accounts."""
+    """Display compact, clean AGY quota and Argon status table for all accounts."""
     import concurrent.futures
 
     data = load_accounts()
     accounts = data.get("accounts", [])
     active = data.get("active")
 
-    print()
-    print(bold("═" * 68))
-    print(bold("  📈 Google AGY Live Quota (Direct Backend Data)"))
-    print(bold("═" * 68))
-    print()
-    print(f"  Active Account:  {green(active) if active else yellow('None')}")
-    print()
-    print("  " + "─" * 68)
-
     if not accounts:
-        print(yellow("  No accounts registered."))
+        print()
+        print(yellow("  Hesab tapılmadı. Əlavə etmək üçün: agy-account add"))
         print()
         return
 
-    print(dim("  ⚡ Querying Google backend live in parallel..."), flush=True)
+    if sys.stdout.isatty():
+        sys.stdout.write(dim("  ⚡ Yoxlanılır...\r"))
+        sys.stdout.flush()
 
     def _fetch_worker(acc):
         em = acc["email"]
         qdata = fetch_native_agy_quota(em)
-        h5 = qdata.get("gemini_5h_pct", 0.0)
-        weekly = qdata.get("gemini_weekly_pct", 0.0)
+        h5 = float(qdata.get("gemini_5h_pct", 0.0))
+        weekly = float(qdata.get("gemini_weekly_pct", 0.0))
+        has_argon = bool(qdata.get("has_argon", False))
+        is_act = (em == active)
         score = h5 * 10.0 + weekly
-        return (score, em, qdata)
+        return ((1 if is_act else 0, 1 if has_argon else 0, score), em, qdata)
 
     max_workers = min(len(accounts), 8)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1110,66 +1169,43 @@ def cmd_usage():
 
     ranked_accounts.sort(key=lambda x: x[0], reverse=True)
 
-    for rank, (score, em, qdata) in enumerate(ranked_accounts, 1):
+    if sys.stdout.isatty():
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
+    print()
+    print(f"  {bold('📊 AGY Kvota və Argon Statusu')}")
+    print("  " + "─" * 52)
+    print(dim(f"  {'Hesab':<25} {'5-Saat':>6} {'Həftə':>7}   {'Argon'}"))
+    print("  " + "─" * 52)
+
+    for _, em, qdata in ranked_accounts:
         is_active = (em == active)
-        active_tag = green("[ACTIVE]") if is_active else dim("[STANDBY]")
-        h5 = qdata.get("gemini_5h_pct", 0.0)
-        weekly = qdata.get("gemini_weekly_pct", 0.0)
-
-        filled_5h = int(h5 / 100.0 * 12)
-        bar_5h = "█" * filled_5h + "░" * (12 - filled_5h)
-        col_5h = green(bar_5h) if h5 >= 50 else yellow(bar_5h) if h5 >= 15 else red(bar_5h)
-
-        filled_w = int(weekly / 100.0 * 12)
-        bar_w = "█" * filled_w + "░" * (12 - filled_w)
-        col_w = green(bar_w) if weekly >= 50 else yellow(bar_w) if weekly >= 15 else red(bar_w)
-
-        raw_status = qdata.get("status_label", "EXHAUSTED")
-        if raw_status == "READY":
-            status_text = green("READY")
-        elif raw_status == "LOW QUOTA":
-            status_text = yellow("LOW QUOTA")
-        elif raw_status == "NEEDS VERIFICATION":
-            status_text = yellow("NEEDS GOOGLE VERIFICATION (Verify in browser)")
-        else:
-            status_text = red("EXHAUSTED (0%)")
-
-        if is_active:
-            status_text = green("ACTIVE & IN USE")
-
-        has_argon = qdata.get("has_argon", False)
+        h5 = float(qdata.get("gemini_5h_pct", 0.0))
+        weekly = float(qdata.get("gemini_weekly_pct", 0.0))
+        has_argon = bool(qdata.get("has_argon", False))
         argon_pct = qdata.get("argon_weekly_pct")
-        reset_argon = qdata.get("reset_argon")
-        argon_badge = " " + cyan(bold("[ARGON ⚡]")) if has_argon else ""
 
-        print(f"  #{rank} {bold(em):<28} {active_tag}{argon_badge} | Status: {status_text}")
-        print(f"     5-Hour Limit:  [{col_5h}] {bold(f'{h5:.1f}%'):<7} (Reset: {qdata.get('reset_5h', 'N/A')})")
-        print(f"     Weekly Limit:  [{col_w}] {bold(f'{weekly:.1f}%'):<7} (Reset: {qdata.get('reset_weekly', 'N/A')})")
-        if has_argon and argon_pct is not None:
-            filled_a = int(argon_pct / 100.0 * 12)
-            bar_a = "█" * filled_a + "░" * (12 - filled_a)
-            col_a = green(bar_a) if argon_pct >= 50 else yellow(bar_a) if argon_pct >= 15 else red(bar_a)
-            print(f"     Argon Quota:   [{col_a}] {bold(f'{argon_pct:.1f}%'):<7} (Reset: {reset_argon or 'N/A'})")
+        marker = green("► ") if is_active else "  "
+        em_col = green(bold(f"{em:<25}")) if is_active else f"{em:<25}"
+
+        h5_str = f"{h5:.0f}%"
+        h5_pad = f"{h5_str:>6}"
+        h5_col = green(h5_pad) if h5 >= 50 else yellow(h5_pad) if h5 >= 15 else red(h5_pad)
+
+        wk_str = f"{weekly:.0f}%"
+        wk_pad = f"{wk_str:>7}"
+        wk_col = green(wk_pad) if weekly >= 50 else yellow(wk_pad) if weekly >= 15 else red(wk_pad)
+
+        if has_argon:
+            ar_str = f"{argon_pct:.0f}% ⚡" if argon_pct is not None else "AÇIQ ⚡"
+            ar_col = "   " + cyan(bold(ar_str))
         else:
-            print(f"     Argon Access:  {dim('— Not enabled (Standard)')}")
-        print()
+            ar_col = "     " + dim("—")
 
-    # Fast in-memory priority determination
-    cfg = load_config()
-    threshold = float(cfg.get("threshold", 5.0))
-    candidates = []
-    for score, em, qdata in ranked_accounts:
-        if em != active:
-            h5 = float(qdata.get("gemini_5h_pct", 0.0))
-            weekly = float(qdata.get("gemini_weekly_pct", 0.0))
-            if h5 > threshold and weekly > 0.0:
-                c_score = (h5 * 1000.0) + weekly
-                candidates.append((c_score, em))
-    if candidates:
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        best_next = candidates[0][1]
-        print(f"  🎯 {cyan('Auto-Switch Priority')}: Next account will be {green(best_next)} (Highest Real Quota)")
-    print("  " + "─" * 68)
+        print(f"{marker}{em_col} {h5_col} {wk_col} {ar_col}")
+
+    print("  " + "─" * 52)
     print()
 
 
@@ -1177,34 +1213,62 @@ def cmd_usage():
 # MAIN
 # ============================================================
 def main():
-    if len(sys.argv) < 2:
-        cmd_list()
-        return
+    import atexit
+    import signal
 
-    command = sys.argv[1].lower()
+    saved_tty = None
+    if sys.stdin.isatty():
+        try:
+            import termios
+            saved_tty = termios.tcgetattr(sys.stdin.fileno())
+        except Exception:
+            pass
 
-    if command == "list":
-        cmd_list()
-    elif command == "add":
-        cmd_add()
-    elif command == "code":
-        code_val = sys.argv[2] if len(sys.argv) > 2 else None
-        cmd_code(code_val)
-    elif command == "switch":
-        target = sys.argv[2] if len(sys.argv) > 2 else None
-        cmd_switch(target)
-    elif command == "remove":
-        email = sys.argv[2] if len(sys.argv) > 2 else None
-        cmd_remove(email)
-    elif command == "status":
-        cmd_status()
-    elif command == "config":
-        cmd_config(sys.argv[2:] if len(sys.argv) > 2 else None)
-    elif command == "usage":
-        cmd_usage()
-    else:
-        print(red(f"  Unknown command: {command}"))
-        print("  Available: list, add, code, switch, remove, status, config, usage")
+    atexit.register(ensure_sane_terminal, saved_tty)
+
+    def _sig_handler(signum, frame):
+        ensure_sane_terminal(saved_tty)
+        sys.exit(0)
+
+    try:
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
+    except Exception:
+        pass
+
+    try:
+        if len(sys.argv) < 2:
+            cmd_list()
+            return
+
+        command = sys.argv[1].lower()
+
+        if command == "list":
+            cmd_list()
+        elif command == "add":
+            cmd_add()
+        elif command == "code":
+            code_val = sys.argv[2] if len(sys.argv) > 2 else None
+            cmd_code(code_val)
+        elif command == "switch":
+            target = sys.argv[2] if len(sys.argv) > 2 else None
+            cmd_switch(target)
+        elif command == "remove":
+            email = sys.argv[2] if len(sys.argv) > 2 else None
+            cmd_remove(email)
+        elif command == "status":
+            cmd_status()
+        elif command == "config":
+            cmd_config(sys.argv[2:] if len(sys.argv) > 2 else None)
+        elif command == "usage":
+            cmd_usage()
+        else:
+            print(red(f"  Unknown command: {command}"))
+            print("  Available: list, add, code, switch, remove, status, config, usage")
+    except KeyboardInterrupt:
+        print()
+    finally:
+        ensure_sane_terminal(saved_tty)
 
 
 if __name__ == "__main__":
