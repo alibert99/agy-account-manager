@@ -1,44 +1,47 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Exit on error
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_DIR="${HOME}/.gemini/config/plugins/agy-account-manager"
+BIN_DIR="${HOME}/.local/bin"
+WRAPPER_PATH="${BIN_DIR}/agy-account"
 
-echo "Installing AGY Account Manager Plugin..."
+echo "Installing AGY Account Manager v2.0.0..."
 
-PLUGIN_DIR="$HOME/.gemini/config/plugins/agy-account-manager"
-echo "Copying plugin files to $PLUGIN_DIR..."
-mkdir -p "$PLUGIN_DIR"
-
-# Copy files, excluding git metadata
-cp -rf plugin.json hooks.json "$PLUGIN_DIR/"
-[ -d commands ] && cp -rf commands/ "$PLUGIN_DIR/"
-[ -d skills ] && cp -rf skills/ "$PLUGIN_DIR/"
-[ -d scripts ] && cp -rf scripts/ "$PLUGIN_DIR/"
-
-# Validate plugin
-if command -v agy &> /dev/null; then
-    echo "Validating plugin installation..."
-    agy plugin validate "$PLUGIN_DIR" || echo "Warning: plugin validation returned some warnings."
-else
-    echo "Warning: agy CLI not found in PATH."
+if [[ "${SCRIPT_DIR}" != "${PLUGIN_DIR}" ]]; then
+  if command -v agy >/dev/null 2>&1; then
+    echo "Installing plugin via 'agy plugin install'..."
+    agy plugin install "${SCRIPT_DIR}"
+  else
+    echo "Copying plugin files to ${PLUGIN_DIR}..."
+    mkdir -p "${PLUGIN_DIR}"
+    cp -f "${SCRIPT_DIR}/plugin.json" "${SCRIPT_DIR}/hooks.json" "${PLUGIN_DIR}/"
+    cp -rf "${SCRIPT_DIR}/assets" "${SCRIPT_DIR}/skills" "${SCRIPT_DIR}/scripts" "${PLUGIN_DIR}/"
+  fi
 fi
 
-# Create the shell wrapper
-BIN_DIR="$HOME/.local/bin"
-mkdir -p "$BIN_DIR"
-WRAPPER_PATH="$BIN_DIR/agy-account"
+chmod +x "${PLUGIN_DIR}/scripts/account_manager.py" "${PLUGIN_DIR}/scripts/agy_quota_hook.py"
 
-echo "Creating command wrapper at $WRAPPER_PATH..."
-cat << 'EOF' > "$WRAPPER_PATH"
-#!/bin/bash
-# Wrapper for AGY Google Account Manager plugin
-python3 "$HOME/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py" "$@"
+if command -v agy >/dev/null 2>&1; then
+  echo "Validating plugin..."
+  agy plugin validate --strict "${PLUGIN_DIR}"
+else
+  echo "Warning: 'agy' CLI not found in PATH."
+fi
+
+mkdir -p "${BIN_DIR}"
+cat > "${WRAPPER_PATH}" <<'EOF'
+#!/usr/bin/env bash
+exec python3 "${HOME}/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py" "$@"
 EOF
-
-chmod +x "$WRAPPER_PATH"
+chmod +x "${WRAPPER_PATH}"
 
 echo ""
-echo "Success! The 'agy-account' command has been installed."
-echo "If '$BIN_DIR' is not in your PATH, please add it to your shell configuration (e.g. .bashrc or .zshrc):"
-echo "  export PATH=\"\$HOME/.external_bin:\$PATH\""
-echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+echo "Installed successfully!"
+echo "  Plugin:      ${PLUGIN_DIR}"
+echo "  CLI wrapper: ${WRAPPER_PATH}"
+if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
+  echo ""
+  echo "Add ${BIN_DIR} to your PATH to use 'agy-account' from anywhere:"
+  echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+fi

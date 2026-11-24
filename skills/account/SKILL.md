@@ -1,74 +1,87 @@
 ---
 name: account
-description: Manage AGY Google accounts. Add, list, switch, or remove accounts for quota rotation.
+description: Manage multiple AGY Google accounts. Add, list, switch, remove accounts, inspect quotas/models, or configure automatic quota rotation.
 ---
 
-# Account Manager
+# AGY Account Manager
 
-This skill manages multiple Google accounts for AGY with automatic quota rotation.
+This skill manages multiple Google accounts for Antigravity CLI (`agy`) with isolated quota checking and automatic quota rotation.
 
-When the user invokes `/account` or asks about account management, determine the subcommand from their input and run the appropriate command using the terminal.
+When the user invokes `/account` or asks about managing AGY accounts, determine the requested action and run the matching command below using the terminal.
 
 ## Available Commands
 
 ### List accounts
-When the user says `/account list` or `/account` with no arguments:
+When the user runs `/account` or `/account list`:
 ```bash
-python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py list
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py list --no-interactive
 ```
 
 ### Add a new account
-When the user says `/account add`:
+When the user runs `/account add`:
 ```bash
 python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py add
 ```
-This will display a Google OAuth URL and instructions. Tell the user to open the link, login, and copy the code or the redirect URL.
+This outputs a Google OAuth URL (PKCE). Instruct the user to open the link, sign in, and copy the authorization code or callback URL.
 
-### Exchange code for tokens
-When the user says `/account code <copied_code_or_url>`:
+### Complete sign-in with authorization code
+When the user runs `/account code <copied_code_or_url>`:
 ```bash
-python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py code <copied_code_or_url>
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py code "<copied_code_or_url>"
 ```
-Replace `<copied_code_or_url>` with the code or URL provided by the user.
 
-### Switch to next account
-When the user says `/account switch` with no specific account:
+### Switch to the best available account
+When the user runs `/account switch` with no arguments:
 ```bash
 python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py switch
 ```
 
 ### Switch to a specific account
-When the user says `/account switch <email>` with a specific email:
+When the user runs `/account switch <email_or_index>`:
 ```bash
-python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py switch <email>
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py switch "<email_or_index>"
 ```
-Replace `<email>` with the actual email provided by the user.
 
 ### Remove an account
-When the user says `/account remove <email>`:
+When the user runs `/account remove <email>`:
 ```bash
-python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py remove <email>
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py remove "<email>"
 ```
 
-### Show current status
-When the user says `/account status`:
+### Show account and configuration status
+When the user runs `/account status`:
 ```bash
 python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py status
 ```
 
-### Configure auto-switch settings
-When the user says `/account config`:
+### View or update auto-switch configuration
+When the user runs `/account config` or `/account config <key> <value>`:
 ```bash
 python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py config
 ```
+Or with arguments:
+```bash
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py config <key> <value>
+```
 
-### Show quota usage
-When the user says `/account usage`:
+### Check quota usage across all accounts
+When the user runs `/account usage` (append `--refresh` if the user asks for fresh/live data):
 ```bash
 python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py usage
 ```
 
+### Check available models across accounts
+When the user runs `/account models` or `/account models <filter>`:
+```bash
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py models
+```
+
+### Check Gemini 4 Hydrogen availability
+When the user runs `/account hydrogen` or asks which accounts have Gemini 4 Hydrogen access:
+```bash
+python3 ~/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py hydrogen
+```
+
 ## Important Notes
-- After switching accounts, inform the user they may need to restart AGY for the new credentials to take effect.
-- Always run the command and show the output to the user.
-- Do not modify the commands - run them exactly as shown.
+- Always execute the command and present its output clearly to the user.
+- After switching accounts, remind the user to restart AGY if the running session continues using cached in-memory credentials.

@@ -1,15 +1,24 @@
 {
   "agy-quota-manager": {
-    "PostInvocation": [
-      {
-        "type": "command",
-        "command": "/usr/bin/python3 /home/ubuntu/.gemini/config/plugins/agy-account-manager/scripts/agy_quota_hook.py post"
-      }
-    ],
     "PreInvocation": [
       {
         "type": "command",
-        "command": "/usr/bin/python3 /home/ubuntu/.gemini/config/plugins/agy-account-manager/scripts/agy_quota_hook.py pre"
+        "command": "python3 ./scripts/agy_quota_hook.py pre",
+        "timeout": 30
+      }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "python3 ./scripts/agy_quota_hook.py post",
+        "timeout": 30
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 ./scripts/agy_quota_hook.py stop",
+        "timeout": 30
       }
     ]
   }

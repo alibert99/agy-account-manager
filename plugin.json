@@ -1,5 +1,12 @@
 {
   "name": "agy-account-manager",
-  "version": "1.0.0",
-  "description": "Multi-account manager for AGY. Add, list, and switch Google accounts with auto-rotation on quota exhaustion."
+  "version": "2.0.0",
+  "description": "Native multi-account manager for Antigravity CLI (AGY). Switch Google accounts, monitor live quotas and model tiers in parallel, and auto-rotate on quota exhaustion.",
+  "author": {
+    "name": "alibert99",
+    "url": "https://github.com/alibert99"
+  },
+  "homepage": "https://github.com/alibert99/agy-account-manager",
+  "repository": "https://github.com/alibert99/agy-account-manager",
+  "logo": "assets/logo.svg"
 }

@@ -1,130 +1,144 @@
 # AGY Account Manager
 
-A native plugin for [Antigravity CLI (AGY)](https://github.com) to manage multiple Google accounts and automatically switch credentials when your API quota is exhausted.
+A **native plugin** for **Antigravity CLI (`agy`)** to manage multiple Google accounts, monitor live quotas and model access in parallel, and automatically rotate accounts on quota exhaustion.
+
+Built with **zero external dependencies** (Python 3.8+ standard library only) — ideal for headless Linux servers, VPS/SSH sessions, and terminal-first workflows without needing a desktop GUI or background daemon.
+
+---
 
 ## Features
 
-- 🔑 **Multi-Account Support**: Authenticate and save multiple Google accounts via OAuth.
-- 🔄 **Auto-Switching**: Automatically intercept `429`, `Resource exhausted`, and other rate-limit error responses, then switch to the next configured account with valid credentials.
-- ⚙️ **Custom Configuration**: Toggle auto-switching, set retry thresholds, and customize model matching rules.
-- 🎛️ **Slash Commands**: Manage accounts directly inside AGY via the `/account` command.
+- **Native AGY Plugin** — Installs directly with `agy plugin install` and exposes `/account` and `/quota` skills inside your AGY session.
+- **Parallel Isolated Quota Scanning** — Checks 5-hour and weekly quotas plus available model tiers (including Argon & Hydrogen) across all accounts in parallel inside isolated temporary `HOME` directories, so your active OAuth token is never overwritten or corrupted.
+- **Smart Auto-Switching Hooks** — Lifecycle hooks (`PreInvocation`, `PostInvocation`, and `Stop`) detect `429` / `RESOURCE_EXHAUSTED` / rate-limit errors and automatically rotate to the account with the highest remaining quota.
+- **Interactive Terminal Switcher** — Running `agy-account` (or `agy-account list`) in an interactive terminal opens a fast arrow-key / vim (`j`/`k`) / number (`1-9`) account picker.
+- **OAuth 2.0 + PKCE** — Add accounts cleanly from headless/SSH environments by copying the sign-in URL and pasting the authorization code.
+- **Hardened & Zero-Dependency** — Uses reentrant `flock` locking, atomic writes, `0600` credential permissions, and Python's standard library only (no `pip install` needed).
+
+---
+
+## Requirements
+
+- [Antigravity CLI (`agy`)](https://antigravity.google) installed and available in `PATH`
+- Python 3.8+ (Linux / macOS)
 
 ---
 
 ## Installation
 
-### 1. Clone the repository
-Clone this repository to your local machine:
+### 1. Quick Setup (Plugin + CLI Wrapper)
+
 ```bash
 git clone https://github.com/alibert99/agy-account-manager.git ~/agy-account-manager
-```
-
-### 2. Run the Setup Script
-Run the provided setup script to automatically install the plugin into AGY and create the `agy-account` shell wrapper command (in `~/.local/bin/`):
-```bash
 cd ~/agy-account-manager
 ./setup.sh
 ```
 
-Ensure `~/.local/bin` is in your shell `PATH` variable so you can run the command from anywhere.
+This installs the native plugin into AGY, validates it with `agy plugin validate --strict`, and creates the optional `agy-account` terminal command in `~/.local/bin/agy-account`.
 
-#### Manual Installation (Alternative)
-If you prefer to install it manually:
-1. Install the plugin using the AGY CLI:
-   ```bash
-   agy plugin install ~/agy-account-manager
-   ```
-2. Create the shell wrapper command manually:
-   ```bash
-   mkdir -p ~/.local/bin
-   cat << 'EOF' > ~/.local/bin/agy-account
-   #!/bin/bash
-   python3 "$HOME/.gemini/config/plugins/agy-account-manager/scripts/account_manager.py" "$@"
-   EOF
-   chmod +x ~/.local/bin/agy-account
-   ```
+### 2. Manual Plugin-Only Installation
+
+```bash
+git clone https://github.com/alibert99/agy-account-manager.git ~/agy-account-manager
+agy plugin install ~/agy-account-manager
+agy plugin list
+```
 
 ---
 
 ## Usage
 
-Once installed, you can use the following commands inside your AGY terminal or run the python script directly.
+You can run commands **inside AGY** via `/account` and `/quota`, or **from your terminal** via `agy-account`.
 
-### Commands
+| Inside AGY | Terminal (`agy-account`) | Description |
+|---|---|---|
+| `/account` or `/account list` | `agy-account` / `agy-account list` | List accounts (opens interactive picker in a TTY; pass `--no-interactive` for plain list) |
+| `/account add` | `agy-account add` | Generate a Google OAuth (PKCE) sign-in URL to add an account |
+| `/account code <code>` | `agy-account code <code>` | Exchange the copied authorization code or callback URL for tokens |
+| `/account switch` | `agy-account switch` | Auto-select and switch to the account with the highest remaining quota |
+| `/account switch <email\|#>` | `agy-account switch <email\|#>` | Switch to a specific account by email substring or list index |
+| `/account remove <email>` | `agy-account remove <email>` | Remove an account and automatically re-sync active credentials if needed |
+| `/account status` | `agy-account status` | Display active account, auto-switch settings, and local credential health |
+| `/account config [k v]` | `agy-account config [k v]` | View or update auto-switch settings |
+| `/quota` or `/account usage` | `agy-account usage [-r]` | Show live 5-hour & weekly quotas plus Argon/Hydrogen tiers (`-r` bypasses 90s cache) |
+| `/account models [filter]` | `agy-account models [filter] [-r]` | Check available AGY models across all accounts (optional substring filter) |
+| `/account hydrogen` | `agy-account hydrogen` | Dedicated check for Gemini 4 Hydrogen access across all accounts |
 
-* **List all accounts**
-  ```bash
-  /account list
-  ```
-  *(or just `/account`)*
+### Example Output (`/quota` / `agy-account usage`)
 
-* **Add a new Google account**
-  ```bash
-  /account add
-  ```
-  This will launch a local server and open a Google Login page in your browser. After logging in, the token will be fetched, parsed, and registered.
-
-* **Switch active account**
-  ```bash
-  /account switch
-  ```
-  *(switches to the next account in the pool)* or:
-  ```bash
-  /account switch <email_or_index>
-  ```
-  *(switches to a specific account by matching email or list index)*
-
-* **Remove an account**
-  ```bash
-  /account remove <email>
-  ```
-
-* **Check current status**
-  ```bash
-  /account status
-  ```
-
-* **Configure settings**
-  ```bash
-  /account config <key> <value>
-  ```
+```text
+  📊 AGY Quota & Model Tier Status
+  ──────────────────────────────────────────────────────────────────
+  Account                     5-Hour  Weekly   Argon     Hydrogen
+  ──────────────────────────────────────────────────────────────────
+► alice@gmail.com               100%     92%   100% ⚡   OPEN ⚛
+  bob@gmail.com                  85%     64%   —         —
+  dev@gmail.com                   0%     40%   —         —
+  ──────────────────────────────────────────────────────────────────
+```
 
 ---
 
-## Configuration Keys
+## Configuration
 
-You can customize the behavior of the auto-switching mechanism with `/account config`:
+Customize auto-switching behavior with `/account config <key> <value>` (stored in `~/.gemini/agy_auth_config.json`):
 
 | Key | Default | Description |
 |---|---|---|
-| `auto_switch` | `true` | Enable or disable automatic account rotation on quota error |
-| `max_retries` | `3` | Maximum number of switch attempts per conversation turn |
-| `threshold` | `10` | Quota threshold (percentage) |
-| `strategy` | `"gemini3.1-series-only"` | Strategy filter for switching accounts |
+| `auto_switch` | `true` | Enable or disable automatic account rotation on quota errors |
+| `threshold` | `10` | Minimum 5-hour remaining quota (%) required to consider an account available |
+| `max_retries` | `3` | Maximum automatic switch attempts per turn |
+| `strategy` | `"highest-quota-first"` | Selection strategy when switching without a target account |
 
-Example:
+Examples:
+
 ```bash
+/account config threshold 15
 /account config max_retries 5
 /account config auto_switch false
 ```
 
+### Custom OAuth Client (Optional)
+
+By default, the plugin uses Google's public installed-app OAuth configuration. You can override it via environment variables:
+
+```bash
+export AGY_OAUTH_CLIENT_ID="your-client-id"
+export AGY_OAUTH_CLIENT_SECRET="your-client-secret"
+```
+
 ---
 
-## File Structure
+## Storage & Security
 
-```
+- Account profiles are saved under `~/.gemini/agy_auth_profiles/<email>/token.json` with `0600` file permissions.
+- Registry and config live in `~/.gemini/agy_accounts.json` and `~/.gemini/agy_auth_config.json` (`0600`).
+- Quota scans run inside ephemeral temporary directories (`HOME=<tempdir>`) so `~/.gemini/antigravity-cli/antigravity-oauth-token` is never touched during inspection.
+- Concurrent writes are guarded by a reentrant process lock (`~/.gemini/.agy_account_manager.lock`).
+
+---
+
+## Project Structure
+
+```text
 agy-account-manager/
-├── plugin.json          # Plugin manifest
-├── hooks.json           # Hook registrations for PreInvocation and PostInvocation
-├── README.md            # Documentation
+├── plugin.json                 # Native AGY plugin manifest
+├── hooks.json                  # PreInvocation, PostInvocation, and Stop hook definitions
+├── assets/
+│   └── logo.svg                # Plugin icon
 ├── skills/
-│   └── account/
-│       └── SKILL.md     # Slash command definition for AGY
-└── scripts/
-    ├── account_manager.py # Main python script for oauth and switching logic
-    └── agy_quota_hook.py  # Hook script executing during Pre/Post invocation
+│   ├── account/SKILL.md        # /account skill definition
+│   └── quota/SKILL.md          # /quota skill definition
+├── scripts/
+│   ├── account_manager.py      # Zero-dependency account & quota manager CLI
+│   └── agy_quota_hook.py       # Official AGY hook handler for auto-rotation
+├── setup.sh                    # One-step plugin & CLI wrapper installer
+├── LICENSE                     # MIT License
+└── README.md
 ```
+
+---
 
 ## License
 
-MIT
+[MIT](LICENSE)
